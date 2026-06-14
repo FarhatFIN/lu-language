@@ -1,0 +1,62 @@
+Lu/Language
+M/ us *user*
+
+// Функции калькулятора
+Fn/add(int a, int b):int {
+    Ret/a + b
+}
+
+Fn/subtract(int a, int b):int {
+    Ret/a - b
+}
+
+Fn/multiply(int a, int b):int {
+    Ret/a * b
+}
+
+Fn/divide(float a, float b):float {
+    If/ b == 0 {
+        Pr/"Ошибка: деление на ноль"
+        Ret/0
+    }
+    Ret/a / b
+}
+
+Fn/power(int base, int exp):int {
+    int result = 1
+    int i = 0
+    Loop/While i < exp {
+        Set/result = result * base
+        Set/i = i + 1
+    }
+    Ret/result
+}
+
+// Главная программа
+#q1
+Pr/"=== Калькулятор на Lu ==="
+int x = 12
+int y = 4
+
+int s = add(x, y)
+Pr/"12 + 4 = "
+Pr/s
+
+int d = subtract(x, y)
+Pr/"12 - 4 = "
+Pr/d
+
+int m = multiply(x, y)
+Pr/"12 * 4 = "
+Pr/m
+
+float q = divide(x, y)
+Pr/"12 / 4 = "
+Pr/q
+
+int p = power(2, 8)
+Pr/"2^8 = "
+Pr/p
+
+Pr/"=== Готово ==="
+#q1:end
