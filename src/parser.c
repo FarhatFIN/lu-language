@@ -1552,10 +1552,16 @@ static ASTNode *parse_statement(Parser *p) {
         node_list_add(&n->children, parse_expr(p)); return n;
     }
     case TOK_CHAN: {
-        consume(p);
+        consume(p); /* eat Chan/ */
         ASTNode *n = node_new(NODE_CHAN_DECL, line);
-        n->type_name = consume_type(p);
-        n->sval = lu_strdup(cur(p)->value); consume(p); return n;
+        /* Chan/name — there is no type, the name IS the variable.
+           Old code called consume_type() which ate the name as a type,
+           producing `lu_chan_t * = lu_chan_new();` (missing var name).
+           Channels are always lu_chan_t*, so we hardcode the type. */
+        n->type_name = lu_strdup("chan");
+        n->sval = lu_strdup(cur(p)->value ? cur(p)->value : "_chan");
+        consume(p); /* eat the channel name */
+        return n;
     }
     case TOK_CHAN_SEND: {
         consume(p);
@@ -1987,6 +1993,18 @@ static ASTNode *parse_statement(Parser *p) {
                 match(p, TOK_RBRACE);
             }
             return else_body;
+        }
+
+        /* chan <- value — channel send (Python/Go-style with arrow).
+           This is the documented syntax in the README; the legacy
+           `Send/chan <- value` form is also still supported via TOK_CHAN_SEND. */
+        if (peek_tok(p, 1)->type == TOK_LARROW) {
+            consume(p); /* eat channel name */
+            consume(p); /* eat <- */
+            ASTNode *n = node_new(NODE_CHAN_SEND, line);
+            n->sval = lu_strdup(v);
+            node_list_add(&n->children, parse_expr(p));
+            return n;
         }
 
         /* C-style assignment: x = expr, obj.field = expr, arr[i] = expr,

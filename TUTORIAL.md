@@ -532,6 +532,98 @@ print(labeled)    // Count: 42
 
 ---
 
+## Урок 16: Каналы, события, логирование
+
+Lu имеет слой из v1.x — асинхронные примитивы, события, отладка. Ниже — рабочий минимум.
+
+### Каналы
+
+```lu
+#q1
+Chan/ch           // создать канал
+ch <- 42          // отправить
+ch <- 100         // отправить ещё
+Pr/"channel ok"
+#q1:end
+```
+
+### События
+
+```lu
+#q1
+Event/click       // объявить событие
+Emit/click "btn"  // вызвать (но обработчиков пока нет)
+Pr/"event ok"
+#q1:end
+```
+
+**Важно:** `On/click callback` сейчас **сломан** — не используйте. Подробности в README, раздел "Не работает".
+
+### Логирование
+
+```lu
+#q1
+Log/info "starting"
+Log/warn "low memory"
+Log/err "failed"
+Log/debug "trace"
+#q1:end
+```
+
+Вывод (с цветами в терминале):
+```
+[Lu info] starting
+[Lu warn] low memory
+[Lu err] failed
+[Lu debug] trace
+```
+
+`Log/fatal` печатает сообщение и вызывает `exit(1)`.
+
+### Утверждения
+
+```lu
+#q1
+int x = 5
+Assert/x > 0 "x must be positive"
+Pr/"ok"
+#q1:end
+```
+
+Если условие ложно — печатает сообщение и завершает программу.
+
+### Исключения
+
+```lu
+#q1
+Try/ {
+    Pr/"before"
+    Throw/ERR_MEM "out of memory"
+    Pr/"after"     // не выполнится
+}
+Catch/ERR_MEM {
+    Pr/"caught memory error"
+}
+Finally/ {
+    Pr/"cleanup"
+}
+Pr/"continue"
+#q1:end
+```
+
+Коды ошибок: `ERR_COR`, `ERR_IP`, `ERR_MEM`, `ERR_MSG`, `ERR_AUTH`.
+
+### Что НЕ работает
+
+Эти конструкции компилируются, но генерируют невалидный C → segfault:
+
+- `On/name callback` — callback передаётся как строка
+- `Spawn/expr` — функция передаётся как int
+
+Не используйте их. Это известные баги, задокументированные в README.
+
+---
+
 ## Проект: Мессенджер
 
 Теперь соберём всё вместе. Полный пример — в `src/messenger.lu`. Вот ключевые части:

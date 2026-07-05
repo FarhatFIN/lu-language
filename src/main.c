@@ -2,7 +2,7 @@
 #include <getopt.h>
 #include <time.h>
 
-#define LUC_VERSION "2.1.1"
+#define LUC_VERSION "2.1.2"
 
 static void usage(const char *prog) {
     fprintf(stderr,

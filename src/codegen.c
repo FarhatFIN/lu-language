@@ -1773,6 +1773,7 @@ static void gen_node(Codegen *cg, ASTNode *n) {
 
     /* ── Channels ── */
     case NODE_CHAN_DECL:
+        cg_sym_add(cg, n->sval ? n->sval : "_ch", "ptr", true);
         iemit(cg, "lu_chan_t *%s = lu_chan_new();\n", n->sval ? n->sval : "_ch");
         return;
     case NODE_CHAN_SEND:

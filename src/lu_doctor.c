@@ -538,6 +538,37 @@ int main(void) {
             "print(f\"{farr[1]}\")\n"
             "#q1:end\n",
             "2.5\n"
+        },
+        /* v2.1.2: undocumented feature coverage (network/async/debug) */
+        {
+            "channel_send",
+            "Lu/Language\n"
+            "#q1\n"
+            "Chan/ch\n"
+            "ch <- 100\n"
+            "ch <- 200\n"
+            "print(\"channel ok\")\n"
+            "#q1:end\n",
+            "channel ok\n"
+        },
+        {
+            "log_levels",
+            "Lu/Language\n"
+            "#q1\n"
+            "Log/info \"starting\"\n"
+            "Log/warn \"low mem\"\n"
+            "#q1:end\n",
+            "\033[0m[Lu info]\033[0m starting\n\033[33m[Lu warn]\033[0m low mem\n"
+        },
+        {
+            "event_emit",
+            "Lu/Language\n"
+            "#q1\n"
+            "Event/click\n"
+            "Emit/click \"btn\"\n"
+            "print(\"event ok\")\n"
+            "#q1:end\n",
+            "event ok\n"
         }
     };
     int total = (int)(sizeof(cases) / sizeof(cases[0]));

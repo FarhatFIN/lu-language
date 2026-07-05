@@ -1,5 +1,63 @@
 # Patch notes: Lu compiler hardening pass
 
+## v2.1.2 — Chan/ parser fix + documented hidden layer
+
+### Critical bug fix (invalid C generation)
+
+`Chan/mychan` generated syntactically invalid C — the variable name was lost:
+
+```c
+lu_chan_t * = lu_chan_new();   // ← missing identifier
+```
+
+**Root cause:** `parse_statement` for `TOK_CHAN` called `consume_type(p)` to read the channel's "type", but `is_type_tok` includes `TOK_IDENT`, so it swallowed the channel name (`mychan`) as the type. The subsequent `n->sval = cur(p)->value` then grabbed whatever token came next.
+
+**Fix:** Channels are always `lu_chan_t*` — there is no type to parse. The parser now hardcodes the type and reads the name directly:
+
+```c
+case TOK_CHAN: {
+    consume(p);                          /* eat Chan/ */
+    ASTNode *n = node_new(NODE_CHAN_DECL, line);
+    n->type_name = lu_strdup("chan");
+    n->sval = lu_strdup(cur(p)->value);  /* the channel name */
+    consume(p);
+    return n;
+}
+```
+
+The codegen symbol table also now registers the channel as a known pointer, so later references don't warn.
+
+### Bonus fix: `chan <- value` now parses at statement level
+
+The `<-` operator was only recognised inside the legacy `Send/chan <- value` form. The README documents `chan <- value` directly, but the parser treated it as a stray expression statement. Now `mychan <- 42` lowers to `lu_chan_send_safe(mychan, ...)` correctly.
+
+### Documentation: the hidden layer
+
+Lu has a large undocumented surface — network primitives, async, events, debug, and a "game engine" DSL. These were implemented in v1.x but never advertised. This release adds a **"Network, async, debug"** section to README and TUTORIAL covering what actually works:
+
+**Working (tested):**
+- `Chan/name` + `name <- value` — channels
+- `Event/name` + `Emit/name data` — events
+- `Log/level msg` — leveled logging
+- `Assert/cond msg` — assertions
+- `Try/ { } Catch/ERR_X { } Finally/ { }` — exceptions
+- `Throw/ERR_MEM "msg"` — throw
+
+**Known broken (documented as unsupported):**
+- `On/name callback` — passes a string where a function pointer is expected → segfault on emit
+- `Spawn/expr` — passes an int where a function pointer is expected → segfault on call
+
+These two are now explicitly listed as **not supported** in README rather than silently generating bad C.
+
+### Validation
+
+- New regression tests: `channel_send`, `log_levels`, `event_emit`
+- All **30/30** agent tests pass (was 27)
+- `make`, `make test`, `make test-all`, `./bootstrap.sh` all pass
+- The `messenger.lu` demo still compiles with 0 warnings
+
+---
+
 ## v2.1.1 — segfault fix: array indexing in f-strings
 
 ### Critical bug fix (segfault)
