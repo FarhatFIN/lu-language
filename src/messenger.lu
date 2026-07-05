@@ -1,0 +1,299 @@
+Lu/Language
+/* ═══════════════════════════════════════════════════════════════
+   Lu Messenger — консольный мессенджер на Lu v2.0
+   Демонстрирует: классы, Vector<T>, f-строки, auto, Python-стиль,
+   строковые функции, ООП.
+   ═══════════════════════════════════════════════════════════════ */
+
+/* Глобальные счётчики (статические переменные файла) */
+int total_messages = 0
+int total_accounts = 0
+int total_chats = 0
+
+/* ── Утилита: получить время как строку ── */
+def now_str() -> str {
+    return "12:00"
+}
+
+/* ╀─ Класс: Сообщение ────────────────────────────────────────── */
+class Message {
+    str text
+    str sender
+    str timestamp
+    bool read
+
+    Fn/init(str t, str s):void {
+        Set/this.text = t
+        Set/this.sender = s
+        Set/this.timestamp = now_str()
+        Set/this.read = false
+    }
+
+    Fn/mark_read():void {
+        Set/this.read = true
+    }
+
+    Fn/format():str {
+        str status = ""
+        If/ this.read == false
+        To/ Set/status = " *"
+        Ret/"[" + this.timestamp + "] " + this.sender + ": " + this.text + status
+    }
+}
+
+/* ╀─ Класс: Аккаунт (пользователь) ──────────────────────────── */
+class Account {
+    str name
+    str uid
+    bool online
+    int unread
+
+    Fn/init(str n, str u):void {
+        Set/this.name = n
+        Set/this.uid = u
+        Set/this.online = true
+        Set/this.unread = 0
+    }
+
+    Fn/status():str {
+        str s = "offline"
+        If/ this.online
+        To/ Set/s = "online"
+        Ret/this.name + " (" + this.uid + ") [" + s + "]"
+    }
+
+    Fn/go_offline():void {
+        Set/this.online = false
+    }
+
+    Fn/go_online():void {
+        Set/this.online = true
+    }
+}
+
+/* ╀─ Класс: Чат ─────────────────────────────────────────────── */
+class Chat {
+    str name
+    str cid
+    bool is_group
+
+    Fn/init(str n, str c, bool g):void {
+        Set/this.name = n
+        Set/this.cid = c
+        Set/this.is_group = g
+    }
+}
+
+/* ── Функции мессенджера ────────────────────────────────────── */
+def send_message(str sender, str receiver, str text) -> void {
+    print(f"[Отправлено] {sender} -> {receiver}: {text}")
+    total_messages += 1
+}
+
+def create_group(str name) -> void {
+    print(f"[Создан групповой чат: {name}]")
+    total_chats += 1
+}
+
+def search_messages(str query) -> void {
+    print(f"[Поиск: '{query}']")
+    If/ contains("Hello Lu World", query)
+    To/ print("  Найдено: 'Hello Lu World' в чате #1")
+    Else/
+    print("  Ничего не найдено")
+}
+
+def show_stats() -> void {
+    print("=== Статистика мессенджера ===")
+    print(f"Пользователей: {total_accounts}")
+    print(f"Чатов: {total_chats}")
+    print(f"Сообщений: {total_messages}")
+}
+
+/* ═══════════════════════════════════════════════════════════════
+   Демонстрация
+   ═══════════════════════════════════════════════════════════════ */
+#q1
+print("==================================")
+print("  Lu Messenger v1.0")
+print("  Написан на Lu v2.0")
+print("==================================")
+print("")
+
+/* ── Регистрация аккаунтов ── */
+print("-- Регистрация --")
+Account alice
+alice.init("Алиса", "@alice")
+total_accounts += 1
+print(alice.status())
+
+Account bob
+bob.init("Борис", "@bob")
+total_accounts += 1
+print(bob.status())
+
+Account carl
+carl.init("Карл", "@carl")
+total_accounts += 1
+print(carl.status())
+
+Account dana
+dana.init("Дана", "@dana")
+total_accounts += 1
+print(dana.status())
+print("")
+
+/* ── Создание сообщений ── */
+print("-- Сообщения --")
+Message m1
+m1.init("Привет, Борис!", "Алиса")
+print(m1.format())
+
+Message m2
+m2.init("Привет, Алиса! Как дела?", "Борис")
+print(m2.format())
+
+Message m3
+m3.init("Отлично, пишу мессенджер на Lu", "Алиса")
+print(m3.format())
+
+Message m4
+m4.init("Круто! Покажи код", "Борис")
+print(m4.format())
+total_messages += 4
+print("")
+
+/* ── Отметка о прочтении ── */
+print("-- Прочтение --")
+m2.mark_read()
+m4.mark_read()
+print(m2.format())
+print(m4.format())
+print("")
+
+/* ── Активная переписка ── */
+print("-- Переписка --")
+send_message("Алиса", "Борис", "Вот исходник:")
+send_message("Борис", "Алиса", "Вау, очень чистый код!")
+send_message("Алиса", "Карл", "Привет, Карл!")
+send_message("Карл", "Алиса", "Привет! Что нового?")
+send_message("Дана", "Борис", "Борис, ты видел Lu v2.0?")
+send_message("Борис", "Дана", "Да! Python-стиль синтаксис — огонь")
+print("")
+
+/* ── Групповые чаты ── */
+print("-- Групповые чаты --")
+create_group("Lu Developers")
+create_group("Команда проекта")
+print("")
+
+/* ── Поиск ── */
+print("-- Поиск --")
+search_messages("Привет")
+search_messages("Lu")
+search_messages("Python")
+print("")
+
+/* ── Управление статусом ── */
+print("-- Статусы --")
+print("Карл уходит офлайн...")
+carl.go_offline()
+print(carl.status())
+print("Карл возвращается...")
+carl.go_online()
+print(carl.status())
+print("")
+
+/* ── Vector: статистика по дням ── */
+print("-- Vector: сообщения по дням --")
+Vector<int> daily
+daily.push(12)
+daily.push(25)
+daily.push(8)
+daily.push(31)
+daily.push(17)
+int dlen = daily.len()
+print(f"Дней в статистике: {dlen}")
+for day in range(5) {
+    auto count = daily.get(day)
+    print(f"  День {day + 1}: {count} сообщений")
+}
+print("")
+
+/* ── Строковые функции ── */
+print("-- Обработка текста --")
+str sample = "Hello Lu World"
+int slen = len(sample)
+str sup = upper(sample)
+str slo = lower(sample)
+bool has_lu = contains(sample, "Lu")
+str replaced = replace(sample, "Lu", "Awesome")
+print(f"Строка: '{sample}'")
+print(f"Длина: {slen}")
+print(f"Верхний: {sup}")
+print(f"Нижний: {slo}")
+print(f"Содержит 'Lu': {has_lu}")
+print(f"Замена: {replaced}")
+print("")
+
+/* ── Аналитика ── */
+print("-- Аналитика --")
+int active = 4
+int avg = total_messages / active
+print(f"Активных: {active}")
+print(f"Всего сообщений: {total_messages}")
+print(f"В среднем на пользователя: {avg}")
+print("")
+
+/* ── Финальная статистика ── */
+show_stats()
+print("")
+
+/* ── Список контактов ── */
+print("-- Контакты --")
+for name in ["Алиса", "Борис", "Карл", "Дана"] {
+    print(f"  Контакт: {name}")
+}
+print("")
+
+/* ── Проверка условий ── */
+print("-- Проверки --")
+if total_messages > 10 {
+    print("Активность высокая!")
+} elif total_messages > 5 {
+    print("Активность средняя")
+} else {
+    print("Активность низкая")
+}
+
+if active >= 4 {
+    print("Достаточно пользователей для группового чата")
+}
+print("")
+
+/* ── Чат с историей ── */
+print("-- История чата --")
+Chat main_chat
+main_chat.init("Общий чат", "#general", true)
+print(f"Чат: {main_chat.name} ({main_chat.cid})")
+print(f"Групповой: {main_chat.is_group}")
+print("")
+
+/* ── Break/continue в цикле ── */
+print("-- Фильтрация сообщений --")
+for i in range(10) {
+    if i == 0 {
+        continue
+    }
+    if i == 6 {
+        break
+    }
+    print(f"  Сообщение #{i}")
+}
+print("")
+
+print("==================================")
+print("  Lu Messenger — демо завершено")
+print("  Спасибо за использование Lu v2.0!")
+print("==================================")
+#q1:end

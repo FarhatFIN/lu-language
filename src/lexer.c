@@ -281,6 +281,21 @@ Token *lexer_tokenize(Lexer *l, int *out_count) {
             tl_add(&tl, make_tok(TOK_STR_LIT, s, line, col)); free(s); continue;
         }
 
+        /* ── f-string: f"..." or f«...» — interpolation like Python ── */
+        if (c == 'f' && peek(l, 1) == '"') {
+            advance(l); /* skip 'f' */
+            char *s = read_string(l);
+            /* Mark as f-string by prefixing $f */
+            char buf[4200]; snprintf(buf, sizeof(buf), "$f%s", s);
+            tl_add(&tl, make_tok(TOK_STR_LIT, buf, line, col)); free(s); continue;
+        }
+        if (c == 'f' && (unsigned char)peek(l, 1) == 0xC2 && (unsigned char)peek(l, 2) == 0xAB) {
+            advance(l); /* skip 'f' */
+            char *s = read_string(l);
+            char buf[4200]; snprintf(buf, sizeof(buf), "$f%s", s);
+            tl_add(&tl, make_tok(TOK_STR_LIT, buf, line, col)); free(s); continue;
+        }
+
         /* ── Template string $« ── */
         if (c == '$') {
             advance(l);
@@ -350,10 +365,20 @@ Token *lexer_tokenize(Lexer *l, int *out_count) {
         }
 
         /* ── Multi-char operators before single-char ── */
+        /* Three-char operators first */
         if (c == '>' && peek(l, 1) == '>' && peek(l, 2) == '>') {
             advance(l); advance(l); advance(l);
             tl_add(&tl, make_tok(TOK_URSHIFT, ">>>", line, col)); continue;
         }
+        if (c == '<' && peek(l, 1) == '<' && peek(l, 2) == '=') {
+            advance(l); advance(l); advance(l);
+            tl_add(&tl, make_tok(TOK_LSHIFT_EQ, "<<=", line, col)); continue;
+        }
+        if (c == '>' && peek(l, 1) == '>' && peek(l, 2) == '=') {
+            advance(l); advance(l); advance(l);
+            tl_add(&tl, make_tok(TOK_RSHIFT_EQ, ">>=", line, col)); continue;
+        }
+        /* Two-char operators */
         if (c == '>' && peek(l, 1) == '>') {
             advance(l); advance(l); tl_add(&tl, make_tok(TOK_RSHIFT, ">>", line, col)); continue;
         }
@@ -392,6 +417,31 @@ Token *lexer_tokenize(Lexer *l, int *out_count) {
         }
         if (c == '-' && peek(l, 1) == '>') {
             advance(l); advance(l); tl_add(&tl, make_tok(TOK_PTR_ACCESS, "->", line, col)); continue;
+        }
+        /* Compound assignment operators */
+        if (c == '+' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_PLUS_EQ, "+=", line, col)); continue;
+        }
+        if (c == '-' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_MINUS_EQ, "-=", line, col)); continue;
+        }
+        if (c == '*' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_STAR_EQ, "*=", line, col)); continue;
+        }
+        if (c == '/' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_SLASH_EQ, "/=", line, col)); continue;
+        }
+        if (c == '%' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_PERCENT_EQ, "%=", line, col)); continue;
+        }
+        if (c == '&' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_AMP_EQ, "&=", line, col)); continue;
+        }
+        if (c == '|' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_PIPE_EQ, "|=", line, col)); continue;
+        }
+        if (c == '^' && peek(l, 1) == '=') {
+            advance(l); advance(l); tl_add(&tl, make_tok(TOK_CARET_EQ, "^=", line, col)); continue;
         }
         /* UTF-8 arrow → (0xE2 0x86 0x92) */
         if ((unsigned char)c == 0xE2 && (unsigned char)peek(l, 1) == 0x86 && (unsigned char)peek(l, 2) == 0x92) {

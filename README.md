@@ -1,10 +1,118 @@
-# luc — Lu Language Compiler v1.2
+# luc — Lu Language Compiler v2.0
 
-**Lu** — компилируемый язык программирования с синтаксисом, вдохновлённым естественным языком.  
+**Lu** — компилируемый язык программирования с **лёгким Python-подобным синтаксисом** и **низкоуровневыми возможностями C++**.  
 Транслируется в C11. Компилятор написан на C и поддерживает **самохостинг**.
 
 ```
 Lu/Language          →  luc  →  output.c  →  gcc  →  ./program
+```
+
+---
+
+## Что нового в v2.0
+
+Lu v2.0 добавляет **Python-подобный синтаксис** поверх существующего Lu-стиля, сохраняя **полную обратную совместимость**. Теперь можно писать код в гибридном стиле — старый и новый синтаксис работают вместе.
+
+### Python-стиль ключевые слова
+
+| Python-стиль (новый) | Lu-стиль (старый) | Описание |
+|----------------------|-------------------|----------|
+| `def f(x) -> int { }` | `Fn/f(x):int { }` | Объявление функции |
+| `print(x)` / `print x` | `Pr/x` | Печать |
+| `return x` | `Ret/x` | Возврат |
+| `if cond { }` | `If/ cond { }` | Условие |
+| `elif cond { }` | `Elif/ cond { }` | Иначе-если |
+| `else { }` | `Else/ { }` | Иначе |
+| `while cond { }` | `Loop/While cond { }` | Цикл while |
+| `for x in expr { }` | `Loop/Each x in expr { }` | Цикл for-each |
+| `break` | `Break/` | Выход из цикла |
+| `continue` | — | Продолжить цикл |
+| `auto x = expr` | — | Вывод типа |
+
+### f-строки (интерполяция)
+
+```lu
+str name = "World"
+int count = 42
+print(f"Hello, {name}! Count: {count}")
+print(f"Sum: {1 + 2 + 3}")
+```
+
+### Стандартная библиотека
+
+**Math** (встроено через `<math.h>`):
+```lu
+print(sqrt(144))    // 12
+print(max(3, 7))    // 7
+print(min(3, 7))    // 3
+print(abs(-42))     // 42
+print(sin(3.14))    // ~0.0016
+print(pow(2, 10))   // 1024
+print(floor(3.7))   // 3
+print(ceil(3.2))    // 4
+```
+
+**String**:
+```lu
+str s = "Hello World"
+print(len(s))           // 11
+print(upper(s))         // HELLO WORLD
+print(lower(s))         // hello world
+print(contains(s, "World"))  // true
+print(replace(s, "World", "Lu"))  // Hello Lu
+```
+
+**IO**:
+```lu
+str content = read_file("input.txt")
+write_file("output.txt", "data")
+str name = input("Enter name: ")
+```
+
+**range()**:
+```lu
+for i in range(10) {
+    print(i)
+}
+```
+
+### Vector<T> — встроенный дженерик-контейнер
+
+```lu
+Vector<int> nums
+nums.push(10)
+nums.push(20)
+nums.push(30)
+print(nums.len())   // 3
+print(nums.get(0))  // 10
+print(nums.pop())   // 30
+```
+
+### Умные указатели
+
+```lu
+// Unique<T> — авто-освобождение при выходе из scope
+Unique<int> p = new int(42)
+print(*p)  // 42
+// p автоматически освобождается
+
+// C-style указатели тоже работают
+ptr/Vec2 ptr = new Vec2()
+Free/ptr
+```
+
+### Конкатенация строк с авто-конверсией
+
+```lu
+str greeting = "Hello, " + "World" + "!"
+str labeled = "Count: " + 42    // авто-конверсия int → str
+```
+
+### Составные операторы присваивания
+
+```lu
+x += 5    x -= 3    x *= 2    x /= 4    x %= 3
+x &= 0xFF  x |= 0x100  x ^= 0xFF  x <<= 4  x >>= 2
 ```
 
 ---
@@ -17,23 +125,45 @@ make
 
 # Компиляция примера
 ./luc example.lu -o example.c
-gcc -O2 -std=c11 -o example example.c
+gcc -O2 -std=c11 -o example example.c -lm
 ./example
 
-# Или одной командой
-make test
-
-# Full bundled regression pass
+# Полная регрессия
 make test-all
+make agent-test
 ```
 
 ---
 
 ## Синтаксис за 30 секунд
 
+### Python-стиль (новый):
+
 ```lu
 Lu/Language
-M/ us *user*
+
+def greet(str name) -> void {
+    print(f"Привет, {name}!")
+}
+
+#q1
+auto x = 42
+for i in range(5) {
+    print(i)
+}
+if x > 40 {
+    print("big")
+} else {
+    print("small")
+}
+greet("мир")
+#q1:end
+```
+
+### Lu-стиль (старый, по-прежнему работает):
+
+```lu
+Lu/Language
 
 Fn/greet(str name):void {
     Pr/"Привет, "
@@ -42,13 +172,29 @@ Fn/greet(str name):void {
 
 #q1
 int x = 42
-Call/greet("мир")
-
 Loop/While x > 0 {
     Set/x = x - 1
 }
+If/ x == 0
+To/ Pr/"Готово"
+#q1:end
+```
 
-Pr/"Готово"
+### Гибридный стиль (оба работают вместе):
+
+```lu
+Lu/Language
+
+def factorial(int n) -> int {
+    If/ n <= 1
+    To/ Ret/1
+    Ret/n * factorial(n - 1)
+}
+
+#q1
+auto result = factorial(5)
+print(f"5! = {result}")
+Pr/result
 #q1:end
 ```
 
@@ -66,18 +212,29 @@ Pr/"Готово"
 | `-s` | Статистика компиляции |
 | `-v` | Версия |
 
+**Важно**: при сборке сгенерированного C-кода добавляйте `-lm` для математической библиотеки:
+```bash
+gcc -O2 -std=c11 -o program output.c -lm
+```
+
 ---
 
 ## Ключевые возможности
 
-- **Компиляция в C11** — нативная производительность, легко интегрируется с существующим C-кодом
-- **4 уровня языка** — от системных деклараций до сетевых примитивов
-- **Управление памятью** — явные `Alloc/`, `Free/`, `Memset/`, `Memcpy/`
-- **Структуры, перечисления, объединения** — полноценные составные типы
-- **Async/Await + каналы** — встроенная асинхронность
-- **Обработка ошибок** — `Try/` / `Catch/` / `Finally/`
-- **OOP core lowering** — простые `class` → C `struct`, методы `Type_method(Type *this, ...)`, `this.field`, `v.method()`, `ptr/Type p = new Type()`
-- **Самохостинг** — `lu_compiler.lu` — компилятор Lu, написанный на Lu
+- **Python-подобный синтаксис** — `def`, `print`, `if/elif/else`, `while`, `for-in`, `break`, `continue`
+- **auto / вывод типов** — компилятор сам определяет тип
+- **f-строки** — `f"value: {x}"` интерполяция
+- **Vector<T>** — встроенный дженерик-контейнер
+- **Умные указатели** — `Unique<T>` с авто-освобождением
+- **Стандартная библиотека** — math, string, io, range
+- **Конкатенация строк** — `"a" + "b"`, `"count: " + 42`
+- **Составные операторы** — `+=`, `-=`, `*=`, `/=`, `%=`, `&=`, `|=`, `^=`, `<<=`, `>>=`
+- **OOP** — class, methods, this, new, ptr, Free
+- **Управление памятью** — new/free, Unique<T>, Alloc/, Memset/, Memcpy/
+- **Обработка ошибок** — Try/ / Catch/ / Finally/
+- **Компиляция в C11** — нативная производительность
+- **Самохостинг** — lu_compiler.lu написан на Lu
+- **Полная обратная совместимость** — старый код работает без изменений
 
 ---
 
@@ -89,48 +246,16 @@ Pr/"Готово"
 ├── lexer.c               # Лексер
 ├── parser.c              # Парсер (рекурсивный спуск)
 ├── semantic.c            # Семантический анализ
-├── codegen.c             # Генератор C-кода
+├── codegen.c             # Генератор C-кода + рантайм
 ├── util.c                # Вспомогательные функции
 ├── lu_self_runtime.h     # Рантайм самохостинга
 ├── Makefile
 ├── bootstrap.sh          # Скрипт самохостинга
-├── example.lu            # Учебный пример
+├── example.lu            # Учебный пример (Lu-стиль)
+├── test_v20.lu           # Демонстрация v2.0 (Python-стиль)
 ├── lu_compiler.lu        # luc, написанный на Lu
-├── kernel_sim.lu         # Симулятор микроядра
-└── test_paradigms.lu     # Тесты
+└── test_*.lu             # Тесты
 ```
-
-
----
-
-## Core+ пример
-
-```lu
-Lu/Language
-
-#q1
-Vec2 v
-v.x = 6
-v.y = 7
-Pr/v.sum()
-
-ptr/Vec2 p = new Vec2()
-p.x = 20
-p.y = 22
-Pr/p.sum()
-Free/p
-#q1:end
-
-class Vec2 {
-    int x
-    int y
-    Fn/sum():int {
-        Ret/this.x + this.y
-    }
-}
-```
-
-Сейчас это понижается в обычный C11: `Vec2` становится `struct`, метод становится функцией `Vec2_sum(Vec2 *this)`, а `v.sum()` становится `Vec2_sum(&v)`.
 
 ---
 
@@ -153,17 +278,4 @@ class Vec2 {
 
 ## Лицензия
 
-Lu Compiler v1.2 · 2026
-
----
-
-## C doctor / local agents
-
-This package includes a plain C regression runner:
-
-```bash
-cd src
-make agent-test
-```
-
-`src/lu_doctor.c` creates small Lu programs, compiles them with `luc`, builds the generated C with GCC, runs the native binaries, and checks stdout. It covers arithmetic, power, enum aliases, array expression sizes, exceptions, class methods, `new/delete`, and language-only imports.
+Lu Compiler v2.0 · 2026

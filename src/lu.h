@@ -161,6 +161,16 @@ typedef enum {
     TOK_ARROW,      /* →  */
     TOK_LARROW,     /* ←  */
     TOK_ASSIGN,     /* =  */
+    TOK_PLUS_EQ,    /* += */
+    TOK_MINUS_EQ,   /* -= */
+    TOK_STAR_EQ,    /* *= */
+    TOK_SLASH_EQ,   /* /= */
+    TOK_PERCENT_EQ, /* %= */
+    TOK_AMP_EQ,     /* &= */
+    TOK_PIPE_EQ,    /* |= */
+    TOK_CARET_EQ,   /* ^= */
+    TOK_LSHIFT_EQ,  /* <<= */
+    TOK_RSHIFT_EQ,  /* >>= */
     TOK_DOT,        /* .  */
     TOK_PTR_ACCESS, /* -> */
     TOK_COMMA,
@@ -287,7 +297,10 @@ typedef enum {
     NODE_CL_CALL,
     NODE_DAM_CALL,
     NODE_ONL_CALL,
-    NODE_SND_GOTO
+    NODE_SND_GOTO,
+    /* v2.0 additions */
+    NODE_FSTRING,       /* f-string: list of parts (literal str or expr) */
+    NODE_MATCH          /* match/case */
 } NodeKind;
 
 /* ─────────────────────────────────────────────
@@ -317,7 +330,7 @@ struct ASTNode {
     int       block_n; /* for #q[n]                  */
     char     *type_name;  /* for typed declarations  */
     char     *op;         /* operator symbol          */
-    char     *annot;      /* annotation name          */
+    char     *annot;      /* annotation name / f-string part kind: "lit" or "expr" */
 };
 
 /* ─────────────────────────────────────────────

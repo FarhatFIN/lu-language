@@ -1,4 +1,4 @@
-# Lu Compiler v1.1 - Makefile
+# Lu Compiler v1.3 - Makefile
 
 CC      = gcc
 CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic \
@@ -24,7 +24,7 @@ $(TARGET): $(OBJS)
 # Quick self-test: compile the bundled example.
 test: $(TARGET) example.lu
 	./$(TARGET) -s example.lu -o example_out.c
-	$(CC) -O2 -std=c11 -o example_out example_out.c
+	$(CC) -O2 -std=c11 -o example_out example_out.c -lm
 	./example_out
 
 # Full regression pass over bundled Lu programs.
@@ -36,7 +36,7 @@ test-all: $(TARGET)
 		base=$$(basename $$f .lu); \
 		echo "[LU TEST] $$f"; \
 		./$(TARGET) $$f -o .lu_test_build/$$base.c >/dev/null; \
-		$(CC) -O2 -std=c11 -I. -o .lu_test_build/$$base .lu_test_build/$$base.c; \
+		$(CC) -O2 -std=c11 -I. -o .lu_test_build/$$base .lu_test_build/$$base.c -lm; \
 		.lu_test_build/$$base >/dev/null; \
 	done
 	@echo "[LU TEST] all bundled Lu programs compiled and ran"

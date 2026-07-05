@@ -141,6 +141,8 @@ static const char *node_kind_name(NodeKind k) {
     case NODE_DAM_CALL:      return "DAM_CALL";
     case NODE_ONL_CALL:      return "ONL_CALL";
     case NODE_SND_GOTO:      return "SND_GOTO";
+    case NODE_FSTRING:       return "FSTRING";
+    case NODE_MATCH:         return "MATCH";
     default:                 return "?";
     }
 }

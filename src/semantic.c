@@ -64,6 +64,14 @@ static const char *semantic_op_mangle(const char *op) {
 }
 
 /* ─────────────────────────────────────────────
+   Enum lookup helpers
+   ───────────────────────────────────────────── */
+/* Find the enum type that declares a member named `member`.
+   Returns the enum name (e.g. "Color" for enum Color { RED, GREEN, BLUE }
+   when looking up "RED"), or NULL if not found. */
+static const char *find_enum_for_member(SymTable *st, const char *member);
+
+/* ─────────────────────────────────────────────
    Type compatibility check
    ───────────────────────────────────────────── */
 static bool types_compatible(const char *a, const char *b) {
@@ -87,6 +95,29 @@ static bool types_compatible(const char *a, const char *b) {
         (!strcmp(a,"ptr") && !strcmp(b,"str")) ||
         (!strcmp(a,"ptr") && !strcmp(b,"id")))
         return true;
+    /* Enum types are int under the hood, so enum↔int is always safe. */
+    {
+        bool a_is_builtin = !strcmp(a,"int") || !strcmp(a,"int64") ||
+                            !strcmp(a,"float") || !strcmp(a,"byte") ||
+                            !strcmp(a,"bool") || !strcmp(a,"void") ||
+                            !strcmp(a,"str") || !strcmp(a,"id") ||
+                            !strcmp(a,"ptr") || !strcmp(a,"auto") ||
+                            !strcmp(a,"type") || !strcmp(a,"ip") ||
+                            !strcmp(a,"cor") || !strcmp(a,"msg") ||
+                            !strcmp(a,"lib");
+        bool b_is_builtin = !strcmp(b,"int") || !strcmp(b,"int64") ||
+                            !strcmp(b,"float") || !strcmp(b,"byte") ||
+                            !strcmp(b,"bool") || !strcmp(b,"void") ||
+                            !strcmp(b,"str") || !strcmp(b,"id") ||
+                            !strcmp(b,"ptr") || !strcmp(b,"auto") ||
+                            !strcmp(b,"type") || !strcmp(b,"ip") ||
+                            !strcmp(b,"cor") || !strcmp(b,"msg") ||
+                            !strcmp(b,"lib");
+        /* If one side is a non-builtin type (i.e. an enum or class) and the
+           other is int, allow it — enums are stored as int. */
+        if (!a_is_builtin && !strcmp(b, "int")) return true;
+        if (!b_is_builtin && !strcmp(a, "int")) return true;
+    }
     return false;
 }
 
@@ -100,9 +131,16 @@ static const char *infer_type(SymTable *st, ASTNode *n) {
     case NODE_LITERAL_BOOL:  return "bool";
     case NODE_LITERAL_IP:    return "ip";
     case NODE_LITERAL_COR:   return "cor";
+    case NODE_FSTRING:       return "str";
     case NODE_IDENT: {
         Symbol *s = sym_find(st, n->sval ? n->sval : "");
-        return s ? s->type : "auto";
+        if (s) return s->type;
+        /* Check if this is an enum member (e.g. RED of enum Color).
+           If so, return the enum type name so type-checking passes for
+           `Color c = RED`. */
+        const char *ety = find_enum_for_member(st, n->sval ? n->sval : "");
+        if (ety) return ety;
+        return "auto";
     }
     case NODE_EXPR_BINOP: {
         const char *lt = infer_type(st, n->children.count > 0 ? n->children.items[0] : NULL);
@@ -159,6 +197,43 @@ static bool validate_cor_key(const char *key, int line) {
         return false;
     }
     return true;
+}
+
+/* ─────────────────────────────────────────────
+   Enum lookup helpers
+   ───────────────────────────────────────────── */
+/* Find the enum type that declares a member named `member`.
+   Returns the enum name (e.g. "Color" for enum Color { RED, GREEN, BLUE }
+   when looking up "RED"), or NULL if not found. */
+static const char *find_enum_for_member(SymTable *st, const char *member) {
+    /* We don't store enum→member mapping in the sym table directly.
+       Walk the symbol table: enum members are added with the enum name
+       as the symbol name (e.g. "Color" with type "type") and as
+       "<Enum>_<Member>" with type "int". We can reconstruct the enum
+       name by looking for "<Enum>_<Member>" entries. */
+    static char enum_buf[128];
+    for (int i = 0; i < st->count; i++) {
+        Symbol *s = &st->entries[i];
+        if (!s->is_const) continue;
+        /* Match "EnumName_Member" pattern */
+        const char *underscore = strchr(s->name, '_');
+        if (!underscore || underscore == s->name) continue;
+        if (!strcmp(underscore + 1, member)) {
+            size_t elen = (size_t)(underscore - s->name);
+            if (elen >= sizeof(enum_buf)) elen = sizeof(enum_buf) - 1;
+            memcpy(enum_buf, s->name, elen);
+            enum_buf[elen] = '\0';
+            /* Verify this is actually an enum (the base name should also exist
+               as a "type" symbol). */
+            for (int j = 0; j < st->count; j++) {
+                if (!strcmp(st->entries[j].name, enum_buf) &&
+                    !strcmp(st->entries[j].type, "type")) {
+                    return enum_buf;
+                }
+            }
+        }
+    }
+    return NULL;
 }
 
 /* ─────────────────────────────────────────────
@@ -231,8 +306,11 @@ static void first_pass(ASTNode *node, SymTable *st, BlockRegistry *br) {
         for (int i = 0; i < node->children.count; i++) {
             ASTNode *m = node->children.items[i];
             if (!m || !m->sval) continue;
+            /* Register the bare member (e.g. RED) with the enum type so
+               `Color c = RED` type-checks correctly. We also keep the
+               prefixed alias (Color_RED) for explicit access. */
             if (!sym_find(st, m->sval))
-                sym_add(st, m->sval, "int", -1, false, false, true, m->line);
+                sym_add(st, m->sval, node->sval, -1, false, false, true, m->line);
             char prefixed[256];
             snprintf(prefixed, sizeof(prefixed), "%s_%s", node->sval, m->sval);
             if (!sym_find(st, prefixed))
@@ -258,12 +336,32 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
                 lu_warn(node->line, "variable '%s' already declared in this scope (line %d)",
                         node->sval,
                         sym_find_in_scope(st, node->sval, scope)->decl_line);
-            sym_add(st, node->sval, node->type_name, scope, false, false, false, node->line);
-            /* type-check initialiser */
+            /* Determine the effective declared type.
+               For `auto`, infer it from the initialiser so that:
+                 (a) the symbol is registered with the real type, and
+                 (b) the type-mismatch check below passes trivially. */
+            const char *eff_type = node->type_name;
+            const char *inferred = NULL;
             if (node->children.count > 0) {
                 ASTNode *init = node->children.items[0];
                 if (init->kind != NODE_LITERAL_INT) { /* arrays: skip */
-                    const char *inferred = infer_type(st, init);
+                    inferred = infer_type(st, init);
+                }
+            }
+            if (eff_type && !strcmp(eff_type, "auto")) {
+                /* `auto x = expr` → use the inferred type as the real type. */
+                if (inferred && strcmp(inferred, "auto") != 0 && strcmp(inferred, "void") != 0)
+                    eff_type = inferred;
+                else
+                    eff_type = "int"; /* fallback when no initialiser or unknown type */
+            }
+            sym_add(st, node->sval, eff_type, scope, false, false, false, node->line);
+            /* type-check initialiser (skip for auto — already inferred) and for arrays */
+            if (node->children.count > 0 && node->type_name &&
+                strcmp(node->type_name, "auto") != 0) {
+                ASTNode *init = node->children.items[0];
+                if (init->kind != NODE_LITERAL_INT) {
+                    if (!inferred) inferred = infer_type(st, init);
                     if (!types_compatible(node->type_name, inferred) &&
                         strcmp(inferred, "auto") != 0)
                         lu_warn(node->line,
@@ -348,10 +446,19 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
                 if (!os) {
                     lu_warn(node->line, "method call on undeclared object '%s'", obj);
                 } else {
-                    char lowered[256];
-                    snprintf(lowered, sizeof(lowered), "%s_%s", os->type, method);
-                    if (!sym_find(st, lowered))
-                        lu_warn(node->line, "method '%s' not found for type '%s'", method, os->type);
+                    /* Built-in generic types (Vector<T>, Unique<T>, Shared<T>)
+                       have methods handled specially by codegen — don't warn
+                       about unknown methods for them. */
+                    bool is_builtin_generic =
+                        !strncmp(os->type, "Vector<", 7) ||
+                        !strncmp(os->type, "Unique<", 7) ||
+                        !strncmp(os->type, "Shared<", 7);
+                    if (!is_builtin_generic) {
+                        char lowered[256];
+                        snprintf(lowered, sizeof(lowered), "%s_%s", os->type, method);
+                        if (!sym_find(st, lowered))
+                            lu_warn(node->line, "method '%s' not found for type '%s'", method, os->type);
+                    }
                 }
             } else if (strncmp(node->sval, "lu_", 3)  != 0 &&
                        strncmp(node->sval, "__lu_", 5) != 0 &&
@@ -453,6 +560,19 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
         /* could check return type against enclosing function — future work */
         break;
 
+    case NODE_LOOP_EACH: {
+        /* Register the loop variable so its use inside the body doesn't
+           produce false "undeclared identifier" warnings. We don't know
+           the list element type, so we use "auto". */
+        if (node->children.count > 0) {
+            ASTNode *item = node->children.items[0];
+            if (item && item->kind == NODE_IDENT && item->sval) {
+                sym_add(st, item->sval, "auto", node->line, false, false, false, node->line);
+            }
+        }
+        break;
+    }
+
     default:
         break;
     }
@@ -526,6 +646,36 @@ bool semantic_check(ASTNode *root, SymTable *st) {
     sym_add(st, "__lu_trace",      "void", -1, false, true, false, 0);
     sym_add(st, "__lu_breakpoint", "void", -1, false, true, false, 0);
     sym_add(st, "__lu_watch",      "void", -1, false, true, false, 0);
+
+    /* ── Standard library: math ── */
+    sym_add(st, "sqrt",  "float", -1, false, true, false, 0);
+    sym_add(st, "pow",   "float", -1, false, true, false, 0);
+    sym_add(st, "sin",   "float", -1, false, true, false, 0);
+    sym_add(st, "cos",   "float", -1, false, true, false, 0);
+    sym_add(st, "tan",   "float", -1, false, true, false, 0);
+    sym_add(st, "abs",   "int",   -1, false, true, false, 0);
+    sym_add(st, "floor", "float", -1, false, true, false, 0);
+    sym_add(st, "ceil",  "float", -1, false, true, false, 0);
+    sym_add(st, "round", "float", -1, false, true, false, 0);
+    sym_add(st, "min",   "int",   -1, false, true, false, 0);
+    sym_add(st, "max",   "int",   -1, false, true, false, 0);
+
+    /* ── Standard library: string ── */
+    sym_add(st, "len",      "int",  -1, false, true, false, 0);
+    sym_add(st, "upper",    "str",  -1, false, true, false, 0);
+    sym_add(st, "lower",    "str",  -1, false, true, false, 0);
+    sym_add(st, "contains", "bool", -1, false, true, false, 0);
+    sym_add(st, "replace",  "str",  -1, false, true, false, 0);
+    sym_add(st, "split",    "str",  -1, false, true, false, 0);
+    sym_add(st, "join",     "str",  -1, false, true, false, 0);
+
+    /* ── Standard library: io ── */
+    sym_add(st, "read_file",  "str",  -1, false, true, false, 0);
+    sym_add(st, "write_file", "void", -1, false, true, false, 0);
+    sym_add(st, "input",      "str",  -1, false, true, false, 0);
+
+    /* ── Standard library: range ── */
+    sym_add(st, "range", "ptr", -1, true, true, false, 0);
     /* Lu error codes */
     sym_add(st, "ERR_COR",  "int", -1, false, false, true, 0);
     sym_add(st, "ERR_IP",   "int", -1, false, false, true, 0);

@@ -45,6 +45,101 @@ static ASTNode *parse_expr(Parser *p);
 static ASTNode *parse_block_body(Parser *p);
 
 /* ─────────────────────────────────────────────
+   F-string v2: parse the content of f"..." into a NODE_FSTRING
+   with children = list of parts.
+   Each part is an ASTNode with:
+     - annot = "lit"  → sval is the literal text
+     - annot = "expr" → children[0] is the parsed expression AST
+   The expression inside {} is parsed by creating a temporary
+   Lexer + Parser on the substring and calling parse_expr.
+   ───────────────────────────────────────────── */
+static ASTNode *parse_fstring(const char *content, int line) {
+    ASTNode *fnode = node_new(NODE_FSTRING, line);
+
+    int i = 0;
+    int len = (int)strlen(content);
+    char litbuf[1024];
+    int litlen = 0;
+
+    while (i < len) {
+        if (content[i] == '{') {
+            /* flush literal part if any */
+            if (litlen > 0) {
+                litbuf[litlen] = '\0';
+                ASTNode *part = node_new(NODE_LITERAL_STR, line);
+                part->annot = lu_strdup("lit");
+                part->sval = lu_strdup(litbuf);
+                node_list_add(&fnode->children, part);
+                litlen = 0;
+            }
+            /* find matching } */
+            int j = i + 1;
+            int depth = 1;
+            while (j < len && depth > 0) {
+                if (content[j] == '{') depth++;
+                else if (content[j] == '}') { depth--; if (depth == 0) break; }
+                j++;
+            }
+            if (depth == 0) {
+                int elen = j - i - 1;
+                /* extract the expression substring */
+                char *expr_str = (char*)malloc(elen + 1);
+                memcpy(expr_str, content + i + 1, elen);
+                expr_str[elen] = '\0';
+                /* parse the expression using a temporary lexer+parser */
+                Lexer *lex = lexer_new(expr_str);
+                int tok_count = 0;
+                Token *toks = lexer_tokenize(lex, &tok_count);
+                Parser tp = { toks, tok_count, 0 };
+                ASTNode *expr_ast = parse_expr(&tp);
+                tokens_free(toks, tok_count);
+                lexer_free(lex);
+                free(expr_str);
+                /* wrap in a part node */
+                ASTNode *part = node_new(NODE_LITERAL_STR, line);
+                part->annot = lu_strdup("expr");
+                if (expr_ast) node_list_add(&part->children, expr_ast);
+                node_list_add(&fnode->children, part);
+                i = j + 1;
+            } else {
+                /* no closing } — treat { as literal */
+                litbuf[litlen++] = content[i++];
+            }
+        } else if (content[i] == '}') {
+            /* stray } — treat as literal */
+            litbuf[litlen++] = content[i++];
+            if (litlen >= (int)sizeof(litbuf) - 1) {
+                litbuf[litlen] = '\0';
+                ASTNode *part = node_new(NODE_LITERAL_STR, line);
+                part->annot = lu_strdup("lit");
+                part->sval = lu_strdup(litbuf);
+                node_list_add(&fnode->children, part);
+                litlen = 0;
+            }
+        } else {
+            litbuf[litlen++] = content[i++];
+            if (litlen >= (int)sizeof(litbuf) - 1) {
+                litbuf[litlen] = '\0';
+                ASTNode *part = node_new(NODE_LITERAL_STR, line);
+                part->annot = lu_strdup("lit");
+                part->sval = lu_strdup(litbuf);
+                node_list_add(&fnode->children, part);
+                litlen = 0;
+            }
+        }
+    }
+    /* flush trailing literal */
+    if (litlen > 0) {
+        litbuf[litlen] = '\0';
+        ASTNode *part = node_new(NODE_LITERAL_STR, line);
+        part->annot = lu_strdup("lit");
+        part->sval = lu_strdup(litbuf);
+        node_list_add(&fnode->children, part);
+    }
+    return fnode;
+}
+
+/* ─────────────────────────────────────────────
    Expression parser (recursive descent)
    ───────────────────────────────────────────── */
 static ASTNode *parse_primary(Parser *p) {
@@ -69,8 +164,16 @@ static ASTNode *parse_primary(Parser *p) {
         n->fval = atof(t->value); consume(p); return n;
     }
     if (t->type == TOK_STR_LIT) {
+        const char *v = t->value ? t->value : "";
+        /* Check for f-string marker: starts with "$f" */
+        if (v[0] == '$' && v[1] == 'f') {
+            /* Parse the f-string into parts (literals + expressions) */
+            ASTNode *n = parse_fstring(v + 2, line);
+            consume(p);
+            return n;
+        }
         ASTNode *n = node_new(NODE_LITERAL_STR, line);
-        n->sval = lu_strdup(t->value); consume(p); return n;
+        n->sval = lu_strdup(v); consume(p); return n;
     }
     if (t->type == TOK_BOOL_LIT) {
         ASTNode *n = node_new(NODE_LITERAL_BOOL, line);
@@ -85,11 +188,42 @@ static ASTNode *parse_primary(Parser *p) {
         return e;
     }
 
+    /* List literal: [1, 2, 3] → lowered to a static C array.
+       We emit it as a NODE_VAR_DECL-like with array marker, but since
+       parse_primary returns an expression, we wrap it in a special node. */
+    if (t->type == TOK_LBRACKET) {
+        consume(p); /* [ */
+        ASTNode *n = node_new(NODE_EXPR_INDEX, line); /* reuse: list literal */
+        n->op = lu_strdup("list");
+        while (!check(p, TOK_RBRACKET) && !check(p, TOK_EOF) && !check(p, TOK_NEWLINE)) {
+            node_list_add(&n->children, parse_expr(p));
+            match(p, TOK_COMMA);
+        }
+        match(p, TOK_RBRACKET);
+        return n;
+    }
+
     /* Unary operators */
     if (t->type == TOK_BANG || t->type == TOK_MINUS || t->type == TOK_TILDE ||
         t->type == TOK_INC || t->type == TOK_DEC) {
         ASTNode *n = node_new(NODE_EXPR_UNOP, line);
         n->op = lu_strdup(t->value); consume(p);
+        node_list_add(&n->children, parse_primary(p));
+        return n;
+    }
+
+    /* *p — C-style dereference */
+    if (t->type == TOK_STAR) {
+        consume(p);
+        ASTNode *n = node_new(NODE_EXPR_DEREF, line);
+        node_list_add(&n->children, parse_primary(p));
+        return n;
+    }
+
+    /* &x — C-style address-of */
+    if (t->type == TOK_AMP) {
+        consume(p);
+        ASTNode *n = node_new(NODE_EXPR_REF, line);
         node_list_add(&n->children, parse_primary(p));
         return n;
     }
@@ -294,6 +428,25 @@ static char *consume_type(Parser *p) {
     if (!is_type_tok(cur(p)->type)) return lu_strdup("auto");
     char *s = lu_strdup(cur(p)->value);
     consume(p);
+    /* Template parameter: Vector<int> → "Vector<int>" */
+    if (check(p, TOK_LT)) {
+        char buf[256];
+        snprintf(buf, sizeof(buf), "%s<", s);
+        free(s);
+        consume(p); /* < */
+        /* collect type name(s) until > */
+        while (!check(p, TOK_GT) && !check(p, TOK_EOF) && !check(p, TOK_NEWLINE)) {
+            if (cur(p)->value) {
+                strncat(buf, cur(p)->value, sizeof(buf) - strlen(buf) - 1);
+                consume(p);
+            } else break;
+        }
+        if (check(p, TOK_GT)) {
+            strncat(buf, ">", sizeof(buf) - strlen(buf) - 1);
+            consume(p);
+        }
+        s = lu_strdup(buf);
+    }
     return s;
 }
 
@@ -760,12 +913,18 @@ static ASTNode *parse_class(Parser *p) {
             opt_newline(p); continue;
         }
 
-        /* Field: type name [= value] */
+        /* Field: type name [= value] or type name[size] */
         if (is_type_tok(cur(p)->type) || check(p, TOK_IDENT)) {
             ASTNode *field = node_new(NODE_VAR_DECL, mline);
             field->annot   = lu_strdup(access);
             field->type_name = consume_type(p);
             if (check(p, TOK_IDENT)) { field->sval = lu_strdup(cur(p)->value); consume(p); }
+            /* optional [size] for array fields */
+            if (match(p, TOK_LBRACKET)) {
+                field->op = lu_strdup("array");
+                node_list_add(&field->children, parse_expr(p));
+                match(p, TOK_RBRACKET);
+            }
             if (match(p, TOK_ASSIGN)) {
                 node_list_add(&field->children, parse_expr(p));
             }
@@ -788,13 +947,26 @@ static ASTNode *parse_struct(Parser *p) {
     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
         skip_newlines(p);
         if (check(p, TOK_RBRACE)) break;
+        int pos_before = p->pos;
         ASTNode *field = node_new(NODE_VAR_DECL, cur(p)->line);
         field->type_name = consume_type(p);
         if (is_type_tok(cur(p)->type) || check(p, TOK_IDENT)) {
             field->sval = lu_strdup(cur(p)->value); consume(p);
         }
+        /* optional [size] for array fields */
+        if (match(p, TOK_LBRACKET)) {
+            field->op = lu_strdup("array");
+            node_list_add(&field->children, parse_expr(p));
+            match(p, TOK_RBRACKET);
+        }
+        /* optional = default value */
+        if (match(p, TOK_ASSIGN)) {
+            /* keep array marker if set; otherwise replace children */
+            node_list_add(&field->children, parse_expr(p));
+        }
         node_list_add(&n->children, field);
         opt_newline(p);
+        if (p->pos == pos_before) consume(p); /* safety: never stall */
     }
     match(p, TOK_RBRACE);
     return n;
@@ -839,6 +1011,32 @@ static ASTNode *parse_namespace(Parser *p) {
 }
 
 /* Parse an lvalue assignment: x = expr, obj.field = expr, arr[i] = expr. */
+/* Helper: is this token a compound assignment operator? */
+static bool is_compound_assign(TokenType t) {
+    return t == TOK_ASSIGN ||
+           t == TOK_PLUS_EQ || t == TOK_MINUS_EQ || t == TOK_STAR_EQ ||
+           t == TOK_SLASH_EQ || t == TOK_PERCENT_EQ || t == TOK_AMP_EQ ||
+           t == TOK_PIPE_EQ || t == TOK_CARET_EQ || t == TOK_LSHIFT_EQ ||
+           t == TOK_RSHIFT_EQ;
+}
+
+/* Map a compound assignment token to its binary operator symbol. */
+static const char *compound_op(TokenType t) {
+    switch (t) {
+        case TOK_PLUS_EQ:    return "+";
+        case TOK_MINUS_EQ:   return "-";
+        case TOK_STAR_EQ:    return "*";
+        case TOK_SLASH_EQ:   return "/";
+        case TOK_PERCENT_EQ: return "%";
+        case TOK_AMP_EQ:     return "&";
+        case TOK_PIPE_EQ:    return "|";
+        case TOK_CARET_EQ:   return "^";
+        case TOK_LSHIFT_EQ:  return "<<";
+        case TOK_RSHIFT_EQ:  return ">>";
+        default:             return NULL;
+    }
+}
+
 static ASTNode *parse_assignment_stmt(Parser *p) {
     int line = cur(p)->line;
     ASTNode *n = node_new(NODE_SET, line);
@@ -854,9 +1052,16 @@ static ASTNode *parse_assignment_stmt(Parser *p) {
             consume(p);
         } else {
             append_token_text(extra, sizeof(extra), "[");
-            consume(p);
-            char idx[128] = "";
-            while (!check(p, TOK_RBRACKET) && !check(p, TOK_EOF)) {
+            consume(p); /* [ */
+            /* consume the full index expression: walk tokens until matching ] */
+            int depth = 1;
+            char idx[192] = "";
+            while (depth > 0 && !check(p, TOK_EOF) && !check(p, TOK_NEWLINE)) {
+                if (check(p, TOK_LBRACKET)) depth++;
+                else if (check(p, TOK_RBRACKET)) {
+                    depth--;
+                    if (depth == 0) break;
+                }
                 if (cur(p)->value) strncat(idx, cur(p)->value, sizeof(idx) - strlen(idx) - 1);
                 consume(p);
             }
@@ -870,8 +1075,20 @@ static ASTNode *parse_assignment_stmt(Parser *p) {
         n->sval = lu_strdup(buf);
     }
 
-    match(p, TOK_ASSIGN);
-    node_list_add(&n->children, parse_expr(p));
+    /* Match the assignment operator (plain or compound). */
+    TokenType at = cur(p)->type;
+    const char *cop = compound_op(at);
+    if (is_compound_assign(at)) consume(p);
+    else cop = NULL; /* fallback: no operator consumed; treat as plain = */
+
+    ASTNode *rhs = parse_expr(p);
+
+    if (cop) {
+        /* x += y  →  x = x + y. Record the operator in op so codegen
+           can expand it. */
+        n->op = lu_strdup(cop);
+    }
+    node_list_add(&n->children, rhs);
     return n;
 }
 
@@ -1036,7 +1253,7 @@ static ASTNode *parse_statement(Parser *p) {
         n->sval = lu_strdup(cur(p)->value); consume(p); /* var */
         /* optional field chain */
         while (check(p, TOK_DOT) || check(p, TOK_PTR_ACCESS) || check(p, TOK_LBRACKET)) {
-            char extra[128] = "";
+            char extra[512] = "";
             if (check(p, TOK_DOT) || check(p, TOK_PTR_ACCESS)) {
                 append_token_text(extra, sizeof(extra), check(p, TOK_PTR_ACCESS) ? "->" : ".");
                 consume(p);
@@ -1044,17 +1261,35 @@ static ASTNode *parse_statement(Parser *p) {
                 consume(p);
             } else {
                 append_token_text(extra, sizeof(extra), "["); consume(p);
-                char idx[32]; snprintf(idx, sizeof(idx), "%s", cur(p)->value ? cur(p)->value : ""); consume(p);
+                /* consume the full index expression: walk tokens until matching ] */
+                int depth = 1;
+                char idx[256] = "";
+                while (depth > 0 && !check(p, TOK_EOF) && !check(p, TOK_NEWLINE)) {
+                    if (check(p, TOK_LBRACKET)) depth++;
+                    else if (check(p, TOK_RBRACKET)) {
+                        depth--;
+                        if (depth == 0) break;
+                    }
+                    if (cur(p)->value) strncat(idx, cur(p)->value, sizeof(idx) - strlen(idx) - 1);
+                    consume(p);
+                }
                 append_token_text(extra, sizeof(extra), idx);
                 append_token_text(extra, sizeof(extra), "]");
                 match(p, TOK_RBRACKET);
             }
             char *old = n->sval;
-            char buf[256]; snprintf(buf, sizeof(buf), "%s%s", old ? old : "", extra);
+            char buf[768]; snprintf(buf, sizeof(buf), "%s%s", old ? old : "", extra);
             free(old); n->sval = lu_strdup(buf);
         }
-        match(p, TOK_ASSIGN);
-        node_list_add(&n->children, parse_expr(p)); return n;
+        /* Match assignment operator (plain or compound). */
+        TokenType at = cur(p)->type;
+        const char *cop = compound_op(at);
+        if (is_compound_assign(at)) consume(p);
+        else cop = NULL;
+        ASTNode *rhs = parse_expr(p);
+        if (cop) n->op = lu_strdup(cop);
+        node_list_add(&n->children, rhs);
+        return n;
     }
     case TOK_RETURN: {
         consume(p);
@@ -1415,8 +1650,348 @@ static ASTNode *parse_statement(Parser *p) {
     case TOK_IDENT: {
         const char *v = cur(p)->value ? cur(p)->value : "";
 
-        /* C-style assignment: x = expr, obj.field = expr, arr[i] = expr. */
-        if (peek_tok(p, 1)->type == TOK_ASSIGN ||
+        /* Vector<T> name — built-in generic container type declaration.
+           Must be checked before the assignment/expression fallback,
+           because `Vector < int > nums` looks like a comparison expression. */
+        if (!strcmp(v, "Vector") && peek_tok(p, 1)->type == TOK_LT) {
+            return parse_var_decl(p);
+        }
+        /* Unique<T> and Shared<T> — smart pointer types */
+        if ((!strcmp(v, "Unique") || !strcmp(v, "Shared")) &&
+            peek_tok(p, 1)->type == TOK_LT) {
+            return parse_var_decl(p);
+        }
+
+        /* ── Python-style keywords (hybrid mode: both styles work) ── */
+
+        /* if cond { } — Python/C-style if (alternative to If/) */
+        if (!strcmp(v, "if")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_IF, line);
+            node_list_add(&n->children, parse_expr(p));
+            skip_newlines(p);
+            ASTNode *then_body = node_new(NODE_PROGRAM, line);
+            if (match(p, TOK_LBRACE)) {
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&then_body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+            }
+            node_list_add(&n->children, then_body);
+            /* check for elif/else chain */
+            skip_newlines(p);
+            if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "elif")) {
+                ASTNode *alt = parse_statement(p);
+                if (alt) node_list_add(&n->children, alt);
+            } else if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "else")) {
+                consume(p);
+                skip_newlines(p);
+                ASTNode *else_body = node_new(NODE_PROGRAM, line);
+                if (match(p, TOK_LBRACE)) {
+                    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                        skip_newlines(p);
+                        if (check(p, TOK_RBRACE)) break;
+                        int pos_before = p->pos;
+                        ASTNode *s = parse_statement(p);
+                        if (s) node_list_add(&else_body->children, s);
+                        opt_newline(p);
+                        if (p->pos == pos_before) consume(p);
+                    }
+                    match(p, TOK_RBRACE);
+                }
+                node_list_add(&n->children, else_body);
+            }
+            return n;
+        }
+
+        /* def name(args):Type { } or def name(args) -> Type { } — function declaration */
+        if (!strcmp(v, "def")) {
+            consume(p); /* eat 'def' */
+            /* Temporarily transform into Fn/ parsing by reading name and calling parse_func-like logic */
+            ASTNode *n = node_new(NODE_FUNC_DECL, line);
+            if (check(p, TOK_IDENT)) { n->sval = lu_strdup(cur(p)->value); consume(p); }
+            match(p, TOK_LPAREN);
+            parse_params(p, n);
+            match(p, TOK_RPAREN);
+            /* return type: :Type or -> Type (-> is TOK_PTR_ACCESS in our lexer) */
+            if (match(p, TOK_COLON)) n->type_name = consume_type(p);
+            else if (match(p, TOK_PTR_ACCESS)) n->type_name = consume_type(p);
+            else if (match(p, TOK_ARROW)) n->type_name = consume_type(p);
+            skip_newlines(p);
+            if (match(p, TOK_LBRACE)) {
+                ASTNode *body = node_new(NODE_PROGRAM, line);
+                skip_newlines(p);
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+                node_list_add(&n->children, body);
+            }
+            return n;
+        }
+
+        /* print expr  or  print(expr)  — Python-style print */
+        if (!strcmp(v, "print")) {
+            /* Only treat as print keyword if followed by ( or a non-assignment token */
+            TokenType next = peek_tok(p, 1)->type;
+            if (next != TOK_ASSIGN && next != TOK_DOT && next != TOK_LBRACKET &&
+                !is_compound_assign(next)) {
+                consume(p); /* eat 'print' */
+                ASTNode *n = node_new(NODE_PR, line);
+                if (check(p, TOK_LPAREN)) {
+                    consume(p);
+                    if (!check(p, TOK_RPAREN) && !check(p, TOK_EOF) && !check(p, TOK_NEWLINE)) {
+                        node_list_add(&n->children, parse_expr(p));
+                        while (match(p, TOK_COMMA)) {
+                            node_list_add(&n->children, parse_expr(p));
+                        }
+                    }
+                    match(p, TOK_RPAREN);
+                } else if (!check(p, TOK_NEWLINE) && !check(p, TOK_EOF)) {
+                    node_list_add(&n->children, parse_expr(p));
+                }
+                return n;
+            }
+        }
+
+        /* return expr  or  return — Python/C-style return */
+        if (!strcmp(v, "return")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_RETURN, line);
+            if (!check(p, TOK_NEWLINE) && !check(p, TOK_EOF))
+                node_list_add(&n->children, parse_expr(p));
+            return n;
+        }
+
+        /* auto name = expr — type inference */
+        if (!strcmp(v, "auto")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_VAR_DECL, line);
+            n->type_name = lu_strdup("auto");
+            if (check(p, TOK_IDENT)) { n->sval = lu_strdup(cur(p)->value); consume(p); }
+            /* optional template <T> */
+            if (match(p, TOK_LT)) {
+                char tbuf[128]; snprintf(tbuf, sizeof(tbuf), "%s", cur(p)->value ? cur(p)->value : "T");
+                consume(p);
+                match(p, TOK_GT);
+                n->annot = lu_strdup(tbuf);
+            }
+            match(p, TOK_ASSIGN);
+            if (!check(p, TOK_NEWLINE) && !check(p, TOK_EOF))
+                node_list_add(&n->children, parse_expr(p));
+            return n;
+        }
+
+        /* while cond { } — Python/C-style while loop */
+        if (!strcmp(v, "while")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_LOOP_WHILE, line);
+            node_list_add(&n->children, parse_expr(p));
+            skip_newlines(p);
+            if (match(p, TOK_LBRACE)) {
+                ASTNode *body = node_new(NODE_PROGRAM, line);
+                skip_newlines(p);
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+                node_list_add(&n->children, body);
+            }
+            return n;
+        }
+
+        /* for x in expr { } — Python-style for-each loop */
+        if (!strcmp(v, "for")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_LOOP_EACH, line);
+            /* item name */
+            ASTNode *item = node_new(NODE_IDENT, line);
+            if (check(p, TOK_IDENT)) { item->sval = lu_strdup(cur(p)->value); consume(p); }
+            node_list_add(&n->children, item);
+            /* expect 'in' */
+            if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "in")) consume(p);
+            node_list_add(&n->children, parse_expr(p));
+            /* body */
+            skip_newlines(p);
+            if (match(p, TOK_LBRACE)) {
+                ASTNode *body = node_new(NODE_PROGRAM, line);
+                skip_newlines(p);
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+                node_list_add(&n->children, body);
+            }
+            return n;
+        }
+
+        /* break — loop exit */
+        if (!strcmp(v, "break")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_RETURN, line);
+            n->sval = lu_strdup("__break__");
+            return n;
+        }
+
+        /* continue — loop skip */
+        if (!strcmp(v, "continue")) {
+            consume(p);
+            ASTNode *n = node_new(NODE_RETURN, line);
+            n->sval = lu_strdup("__continue__");
+            return n;
+        }
+
+        /* match expr { case val { ... } case _ { ... } } — pattern matching */
+        if (!strcmp(v, "match")) {
+            consume(p); /* eat 'match' */
+            ASTNode *n = node_new(NODE_MATCH, line);
+            /* The expression to match */
+            node_list_add(&n->children, parse_expr(p));
+            skip_newlines(p);
+            /* Expect { */
+            if (!match(p, TOK_LBRACE)) return n;
+            skip_newlines(p);
+            /* Parse cases */
+            while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                skip_newlines(p);
+                if (check(p, TOK_RBRACE)) break;
+                int pos_before = p->pos;
+                /* Expect 'case' */
+                if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "case")) {
+                    consume(p); /* eat 'case' */
+                    ASTNode *case_node = node_new(NODE_PROGRAM, cur(p)->line);
+                    /* The case value: either '_' (default) or an expression */
+                    if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "_")) {
+                        consume(p); /* eat '_' */
+                        case_node->annot = lu_strdup("default");
+                    } else {
+                        case_node->annot = lu_strdup("case");
+                        node_list_add(&case_node->children, parse_expr(p));
+                    }
+                    skip_newlines(p);
+                    /* Body { } */
+                    if (match(p, TOK_LBRACE)) {
+                        ASTNode *body = node_new(NODE_PROGRAM, cur(p)->line);
+                        skip_newlines(p);
+                        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                            skip_newlines(p);
+                            if (check(p, TOK_RBRACE)) break;
+                            int body_pos = p->pos;
+                            ASTNode *s = parse_statement(p);
+                            if (s) node_list_add(&body->children, s);
+                            opt_newline(p);
+                            if (p->pos == body_pos) consume(p);
+                        }
+                        match(p, TOK_RBRACE);
+                        node_list_add(&case_node->children, body);
+                    }
+                    node_list_add(&n->children, case_node);
+                } else {
+                    /* Not a 'case' keyword — skip to avoid infinite loop */
+                    consume(p);
+                }
+                opt_newline(p);
+                if (p->pos == pos_before) consume(p);
+            }
+            match(p, TOK_RBRACE);
+            return n;
+        }
+
+        /* elif cond { } — Python-style else-if (must be checked before generic ident) */
+        if (!strcmp(v, "elif")) {
+            /* Treat like If/ — parse_if expects to consume If/ or Elif/ */
+            consume(p);
+            /* Build an if node manually */
+            ASTNode *n = node_new(NODE_IF, line);
+            node_list_add(&n->children, parse_expr(p));
+            skip_newlines(p);
+            ASTNode *then_body = node_new(NODE_PROGRAM, line);
+            if (match(p, TOK_LBRACE)) {
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&then_body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+            }
+            node_list_add(&n->children, then_body);
+            /* check for elif/else chain */
+            skip_newlines(p);
+            if (check(p, TOK_IDENT) && (!strcmp(cur(p)->value, "elif"))) {
+                ASTNode *alt = parse_statement(p);
+                if (alt) node_list_add(&n->children, alt);
+            } else if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "else")) {
+                consume(p);
+                skip_newlines(p);
+                ASTNode *else_body = node_new(NODE_PROGRAM, line);
+                if (match(p, TOK_LBRACE)) {
+                    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                        skip_newlines(p);
+                        if (check(p, TOK_RBRACE)) break;
+                        int pos_before = p->pos;
+                        ASTNode *s = parse_statement(p);
+                        if (s) node_list_add(&else_body->children, s);
+                        opt_newline(p);
+                        if (p->pos == pos_before) consume(p);
+                    }
+                    match(p, TOK_RBRACE);
+                }
+                node_list_add(&n->children, else_body);
+            }
+            return n;
+        }
+
+        /* else { } — Python-style else (standalone, usually after if) */
+        if (!strcmp(v, "else")) {
+            consume(p);
+            skip_newlines(p);
+            ASTNode *else_body = node_new(NODE_PROGRAM, line);
+            if (match(p, TOK_LBRACE)) {
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&else_body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+            }
+            return else_body;
+        }
+
+        /* C-style assignment: x = expr, obj.field = expr, arr[i] = expr,
+           and compound forms: x += expr, arr[i] <<= expr, etc. */
+        if (is_compound_assign(peek_tok(p, 1)->type) ||
             peek_tok(p, 1)->type == TOK_DOT ||
             peek_tok(p, 1)->type == TOK_PTR_ACCESS ||
             peek_tok(p, 1)->type == TOK_LBRACKET) {
@@ -1424,7 +1999,7 @@ static ASTNode *parse_statement(Parser *p) {
             bool is_assign = false;
             while (scan < p->count && p->tokens[scan].type != TOK_NEWLINE &&
                    p->tokens[scan].type != TOK_EOF) {
-                if (p->tokens[scan].type == TOK_ASSIGN) { is_assign = true; break; }
+                if (is_compound_assign(p->tokens[scan].type)) { is_assign = true; break; }
                 if (p->tokens[scan].type == TOK_LPAREN) break;
                 scan++;
             }
