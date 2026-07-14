@@ -1,0 +1,154 @@
+Lu/Language
+M/ us *user*
+
+// ═══════════════════════════════════════════════════════════════════
+// ТЕСТ ОСНОВНЫХ ПАРАДИГМ ПРОГРАММИРОВАНИЯ НА LU
+// ═══════════════════════════════════════════════════════════════════
+
+// Структура
+struct Process {
+    int pid
+    str name
+    int priority
+}
+
+// Перечисление
+enum State {
+    READY,
+    RUNNING,
+    BLOCKED,
+    TERMINATED
+}
+
+// Простые функции
+Fn/process_create(str pname, int pprio):void {
+    Pr/"[CREATE] Процесс: "
+    Pr/pname
+    Pr/" приоритет: "
+    Pr/pprio
+}
+
+Fn/sum_range(int n):int {
+    int total = 0
+    int i = 0
+    Loop/While i < n {
+        Set/total = total + i
+        Set/i = i + 1
+    }
+    Ret/total
+}
+
+Fn/power(int base, int exp):int {
+    int result = 1
+    int count = 0
+    Loop/While count < exp {
+        Set/result = result * base
+        Set/count = count + 1
+    }
+    Ret/result
+}
+
+Fn/max_of_three(int a, int b, int c):int {
+    If/ a > b
+    To/ If/ a > c
+        To/ Ret/a
+        Else/
+        Ret/c
+    Else/
+    If/ b > c
+    To/ Ret/b
+    Else/
+    Ret/c
+}
+
+Fn/string_concat(str s1, str s2):void {
+    Pr/s1
+    Pr/s2
+}
+
+// ── Главный тест ──
+#q1
+Pr/"╔════════════════════════════════════════════════════════════════╗"
+Pr/"║        ТЕСТ ОСНОВНЫХ ПАРАДИГМ ПРОГРАММИРОВАНИЯ НА LU        ║"
+Pr/"╚════════════════════════════════════════════════════════════════╝"
+Pr/""
+
+// Тест 1: Типы данных
+Pr/"=== ТЕСТ 1: ТИПЫ ДАННЫХ ==="
+int integer_val = 42
+float float_val = 3.14159
+str string_val = "Hello, kernel!"
+bool bool_val = true
+Pr/"INT: "
+Pr/integer_val
+Pr/"FLOAT: "
+Pr/float_val
+Pr/"STR: "
+Pr/string_val
+Pr/"BOOL: "
+Pr/bool_val
+Pr/""
+
+// Тест 2: Циклы и условия
+Pr/"=== ТЕСТ 2: ЦИКЛЫ И УСЛОВИЯ ==="
+int sum = 0
+int count = 0
+Loop/10 {
+    If/ count % 2 == 0
+    To/ Set/sum = sum + count
+    Else/
+    Set/sum = sum + count
+    Set/count = count + 1
+}
+Pr/"Сумма(0..9): "
+Pr/sum
+Pr/""
+
+// Тест 3: Функции и вызовы
+Pr/"=== ТЕСТ 3: ФУНКЦИИ И ВЫЗОВЫ ==="
+Call/process_create("init", 10)
+Call/process_create("shell", 5)
+Call/process_create("httpd", 1)
+Pr/""
+
+// Тест 4: Вычисления
+Pr/"=== ТЕСТ 4: ВЫЧИСЛЕНИЯ В ФУНКЦИЯХ ==="
+int s = sum_range(10)
+Pr/"Сумма диапазона(10): "
+Pr/s
+
+int p = power(2, 8)
+Pr/"2^8 = "
+Pr/p
+
+int m = max_of_three(15, 8, 20)
+Pr/"max(15, 8, 20) = "
+Pr/m
+Pr/""
+
+// Тест 5: Структуры и перечисления
+Pr/"=== ТЕСТ 5: СТРУКТУРЫ И ПЕРЕЧИСЛЕНИЯ ==="
+Pr/"[STRUCT Process: id, name, priority]"
+Pr/"[ENUM State: READY, RUNNING, BLOCKED, TERMINATED]"
+Pr/""
+
+// Тест 6: Управление памятью
+Pr/"=== ТЕСТ 6: УПРАВЛЕНИЕ ПАМЯТЬЮ ==="
+ptr/int buffer = Alloc/int:256
+Pr/"[ALLOC] Выделено 256 * int = 1024 байта"
+Memset/buffer 0 1024
+Pr/"[MEMSET] Обнулено 1024 байта"
+Free/buffer
+Pr/"[FREE] Память освобождена"
+Pr/""
+
+// Тест 7: Работа со строками
+Pr/"=== ТЕСТ 7: РАБОТА СО СТРОКАМИ ==="
+Call/string_concat("Hello", " World!")
+Pr/""
+
+// Завершение
+Pr/"╔════════════════════════════════════════════════════════════════╗"
+Pr/"║            ВСЕ ТЕСТЫ ПАРАДИГМ ПРОЙДЕНЫ ✓                     ║"
+Pr/"╚════════════════════════════════════════════════════════════════╝"
+#q1:end

@@ -1,0 +1,154 @@
+Lu/Language
+/* Lu v2.0 — Python-like syntax with C++ level capabilities.
+   This file demonstrates all the new v2.0 features. */
+
+/* === Python-style function declaration === */
+def add(int a, int b) -> int {
+    return a + b
+}
+
+def greet(str name) -> void {
+    print(f"Hello, {name}!")
+}
+
+/* === Class with methods (C++ OOP) === */
+class Stack {
+    int data[100]
+    int top
+
+    Fn/init():void {
+        Set/this.top = 0
+    }
+
+    Fn/push(int v):void {
+        Set/this.data[this.top] = v
+        Set/this.top = this.top + 1
+    }
+
+    Fn/pop():int {
+        Set/this.top = this.top - 1
+        Ret/this.data[this.top]
+    }
+
+    Fn/size():int {
+        Ret/this.top
+    }
+}
+
+/* === Hybrid: old Lu syntax still works === */
+Fn/factorial(int n):int {
+    If/ n <= 1
+    To/ Ret/1
+    Ret/n * factorial(n - 1)
+}
+
+#q1
+/* === auto type inference === */
+auto x = 42
+auto s = "Hello"
+auto pi = 3.14159
+print(x)
+print(s)
+print(pi)
+
+/* === Python-style if/elif/else === */
+if x > 50 {
+    print("big")
+} elif x > 20 {
+    print("medium")
+} else {
+    print("small")
+}
+
+/* === f-string interpolation === */
+int count = 10
+str name = "World"
+print(f"Count: {count}, Name: {name}")
+print(f"Factorial of 5 = {factorial(5)}")
+
+/* === for-in with range() === */
+int total = 0
+for i in range(5) {
+    total += i
+}
+print(f"Sum 0..4 = {total}")
+
+/* === for-in with list literal === */
+for n in [100, 200, 300] {
+    print(n)
+}
+
+/* === while loop === */
+int i = 3
+while i > 0 {
+    print(f"countdown: {i}")
+    i -= 1
+}
+
+/* === break and continue === */
+for j in range(10) {
+    if j == 3 {
+        continue
+    }
+    if j == 7 {
+        break
+    }
+    print(j)
+}
+
+/* === Vector<int> built-in container === */
+Vector<int> nums
+nums.push(10)
+nums.push(20)
+nums.push(30)
+int vsize = nums.len()
+print(f"Vector size: {vsize}")
+print(nums.get(0))
+print(nums.get(1))
+print(nums.get(2))
+
+/* === Class with methods === */
+Stack st
+st.init()
+st.push(100)
+st.push(200)
+print(st.size())
+print(st.pop())
+
+/* === Smart pointers: Unique<T> === */
+Unique<int> p = new int(99)
+print(*p)
+
+/* === Standard library: math === */
+print(sqrt(144))
+print(max(3, 7))
+print(min(3, 7))
+print(abs(-42))
+
+/* === Standard library: string === */
+str text = "Hello World"
+print(len(text))
+print(upper(text))
+print(lower(text))
+print(contains(text, "World"))
+print(replace(text, "World", "Lu"))
+
+/* === Compound assignment === */
+int y = 100
+y += 50
+y -= 25
+y *= 2
+print(y)
+
+/* === String concatenation with + === */
+str greeting = "Hello, " + "World" + "!"
+print(greeting)
+str labeled = "Count: " + 42
+print(labeled)
+
+/* === Mixed old and new syntax === */
+print("=== Mixed syntax ===")
+Pr/x
+Pr/factorial(5)
+Call/greet("Lu")
+#q1:end

@@ -1,0 +1,43 @@
+Lu/Language
+
+M/ us *user*
+
+Def:const MAX = 100
+Def:config timeout = 5000
+
+// ── Обучающий блок: задача 2+2 ──
+#q1
+If/ 2+2 == 4
+To/ Pr/"Правильно! 2+2=4"
+Else/
+Pr/"Неправильно"
+#q1:end
+
+// ── Блок использует Lin из q1 ──
+#q2
+Def:anw(2+2)/Lin
+If/ 1+9 == 11
+To/ Pr/"Неправильно! 1+9=10"
+Else/
+Pr/"Правильно! 1+9=10"
+#q2:end
+
+// ── Функция проверки ──
+Fn/check(int a, int b):bool {
+    If/ a == b
+    To/ Ret/true
+    Else/
+    Ret/false
+}
+
+// ── Цикл ──
+#q3
+Loop/3 {
+    Pr/"Итерация"
+}
+int x = 0
+Loop/While x < 5 {
+    Set/x = x + 1
+}
+Pr/x
+#q3:end
