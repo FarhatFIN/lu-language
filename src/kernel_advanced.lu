@@ -1,0 +1,142 @@
+Lu/Language
+M/ us *server*
+
+// ═══════════════════════════════════════════════════════════════════
+// РАСШИРЕННОЕ ЯДРО С ПЛАНИРОВЩИКОМ И ТАБЛИЦЕЙ ПРОЦЕССОВ
+// ═══════════════════════════════════════════════════════════════════
+
+struct PCB {
+    int pid
+    str name
+    int priority
+    int state
+    int cpu_ticks
+}
+
+// Функции ядра
+Fn/init_pcb_table():void {
+    Pr/"[KERNEL] Инициализация таблицы PCB (Process Control Block)"
+    Pr/"[KERNEL] Размер таблицы: 32 процесса"
+    Pr/"[KERNEL] Требуемая память: 32 * 20 = 640 байт"
+}
+
+Fn/alloc_pcb(int pid, str pname):void {
+    Pr/"[MEMORY] Выделение PCB для процесса #"
+    Pr/pid
+    Pr/"[PCB] Имя: "
+    Pr/pname
+    Pr/"[PCB] Размер: 20 байт"
+}
+
+Fn/queue_ready_process(int pid):void {
+    Pr/"[SCHEDULER] Процесс #"
+    Pr/pid
+    Pr/" добавлен в READY очередь"
+}
+
+Fn/context_switch(int cur_pid, int next_pid):void {
+    Pr/"[CPU] === КОНТЕКСТНЫЙ ПЕРЕКЛЮЧАТЕЛЬ ==="
+    Pr/"[CPU] Сохранение состояния процесса #"
+    Pr/cur_pid
+    Pr/"[CPU] Восстановление состояния процесса #"
+    Pr/next_pid
+    Pr/"[CPU] === ПЕРЕКЛЮЧЕНИЕ ЗАВЕРШЕНО ==="
+}
+
+Fn/dispatch_process(int pid):void {
+    Pr/"[DISPATCH] Передача управления процессу #"
+    Pr/pid
+}
+
+Fn/run_timeslice():void {
+    Pr/"[TIMESLICE] Выполнение кванта времени (10 мс)"
+    int cycles = 0
+    Loop/20 {
+        Set/cycles = cycles + 1
+    }
+    Pr/"[CPU] Выполнено циклов: "
+    Pr/cycles
+}
+
+Fn/handle_timer_interrupt():void {
+    Pr/"[IRQ#0] TIMER INTERRUPT - переключение контекста"
+}
+
+Fn/handle_io_interrupt(int device):void {
+    Pr/"[IRQ#1] IO_INTERRUPT от устройства #"
+    Pr/device
+}
+
+// ── Главное ядро ──
+#q1
+Pr/"╔═══════════════════════════════════════════════════════════════╗"
+Pr/"║            MICROKERNEL WITH SCHEDULER - ADVANCED v0.2         ║"
+Pr/"╚═══════════════════════════════════════════════════════════════╝"
+Pr/""
+
+Pr/"[BOOT] Загрузка ОС в памяти по адресу 0x00400000"
+Pr/""
+
+// Инициализация
+Call/init_pcb_table()
+Pr/""
+
+// Создание процессов
+Pr/"[KERNEL] Таблица процессов:"
+Pr/""
+
+Call/alloc_pcb(1, "init")
+Call/queue_ready_process(1)
+Pr/""
+
+Call/alloc_pcb(2, "shell")
+Call/queue_ready_process(2)
+Pr/""
+
+Call/alloc_pcb(3, "httpd")
+Call/queue_ready_process(3)
+Pr/""
+
+Call/alloc_pcb(4, "driver_net")
+Call/queue_ready_process(4)
+Pr/""
+
+// Симуляция работы планировщика
+Pr/"[SCHEDULER] === ГЛАВНЫЙ ЦИКЛ ПЛАНИРОВЩИКА ==="
+Pr/""
+
+int current_process = 1
+int next_process = 2
+int time_elapsed = 0
+
+Loop/5 {
+    Set/time_elapsed = time_elapsed + 1
+    
+    Pr/"[TIME] t = "
+    Pr/time_elapsed
+    Call/dispatch_process(current_process)
+    Call/run_timeslice()
+    
+    If/ time_elapsed % 2 == 0
+    To/ Call/handle_timer_interrupt()
+    
+    Call/context_switch(current_process, next_process)
+    Set/current_process = next_process
+    Set/next_process = next_process + 1
+    If/ next_process > 4
+    To/ Set/next_process = 1
+    
+    Pr/""
+}
+
+// Завершение
+Pr/"[KERNEL] === CYCLE COMPLETE ==="
+Pr/"[KERNEL] Обработано временных слотов: 5"
+Pr/"[KERNEL] Контекстных переключений: 5"
+Pr/"[KERNEL] Прерываний обработано: 2"
+Pr/""
+
+Pr/"[SHUTDOWN] Остановка ядра"
+Pr/"[POWER] OFF"
+
+#q1:end

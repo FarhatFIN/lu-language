@@ -1,0 +1,122 @@
+Lu/Language
+M/ us *server*
+
+// ═══════════════════════════════════════════════════════════════════
+// МИКРОЯДРО ОС НА LU - ПЛАНИРОВЩИК ЗАДАЧ
+// ═══════════════════════════════════════════════════════════════════
+
+// Состояния процесса
+enum State {
+    READY,
+    RUNNING,
+    BLOCKED,
+    TERMINATED
+}
+
+// Таблица процессов
+struct ProcessControlBlock {
+    int pid
+    str name
+    int priority
+    int state
+    int cycles
+    int ticks
+}
+
+// ── Функции ядра ──
+
+Fn/kernel_init():void {
+    Pr/"[KERNEL] Инициализация ядра"
+    Pr/"[KERNEL] Версия: 0.1"
+    Pr/"[KERNEL] Режим: Микроядро"
+    Pr/"[KERNEL] Планировщик: Round-Robin (RR)"
+}
+
+Fn/process_create(str pname, int pprio):void {
+    Pr/"[KERNEL] Создание процесса: "
+    Pr/pname
+    Pr/"[PID] 0"
+}
+
+Fn/process_switch(int from_pid, int to_pid):void {
+    Pr/"[SCHEDULER] Контекстный переключатель"
+    Pr/"[SWITCH] "
+    Pr/from_pid
+    Pr/" -> "
+    Pr/to_pid
+}
+
+Fn/scheduler_tick():void {
+    Pr/"[SCHEDULER] Тик планировщика"
+    int quantum = 10
+    Loop/5 {
+        Set/quantum = quantum - 1
+    }
+    Pr/"[SCHEDULER] Квант времени: 5"
+}
+
+Fn/interrupt_handler(int irq_num):void {
+    Pr/"[IRQ] Обработчик прерывания номер "
+    Pr/irq_num
+    Call/scheduler_tick()
+}
+
+Fn/kernel_panic(str error_msg):void {
+    Pr/"[PANIC] Критическая ошибка ядра"
+    Pr/error_msg
+    Pr/"[SYSTEM] Остановка"
+}
+
+// ── Главное ядро ──
+#q1
+Pr/"╔═════════════════════════════════════════════════════════════════╗"
+Pr/"║                   MICROKERNEL OS SIMULATOR v0.1                ║"
+Pr/"║                      Powered by Lu Language                    ║"
+Pr/"╚═════════════════════════════════════════════════════════════════╝"
+Pr/""
+
+// Инициализация
+Call/kernel_init()
+Pr/""
+
+// Загрузка процессов
+Pr/"[BOOTLOADER] Загрузка процессов в таблицу PCB"
+Pr/""
+
+Call/process_create("init", 10)
+Call/process_create("shell", 5)
+Call/process_create("httpd", 1)
+
+Pr/""
+Pr/"[KERNEL] Процессы загружены в память"
+Pr/""
+
+// Симуляция работы ядра
+Pr/"[KERNEL] Запуск основного цикла планировщика"
+Pr/""
+
+int tick = 0
+Loop/10 {
+    Set/tick = tick + 1
+    Call/scheduler_tick()
+    
+    If/ tick == 3
+    To/ Call/interrupt_handler(0)
+    
+    If/ tick == 7
+    To/ Call/interrupt_handler(1)
+}
+
+Pr/""
+Pr/"[KERNEL] Симуляция завершена"
+Pr/"[KERNEL] Статистика:"
+Pr/"  - Обработано тиков: 10"
+Pr/"  - Переключений контекста: 2"
+Pr/"  - Прерываний обработано: 2"
+Pr/""
+
+Pr/"╔═════════════════════════════════════════════════════════════════╗"
+Pr/"║                   SHUTDOWN - система остановлена              ║"
+Pr/"╚═════════════════════════════════════════════════════════════════╝"
+
+#q1:end

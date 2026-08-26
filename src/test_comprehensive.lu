@@ -1,0 +1,57 @@
+Lu/Language
+M/ us *debug*
+Def:const VERSION = 1
+
+// Test structs
+struct Point {
+    int x
+    int y
+}
+
+// Test enum
+enum Color {
+    RED,
+    GREEN,
+    BLUE
+}
+
+// Test function
+Fn/max(int a, int b):int {
+    If/ a > b
+    To/ Ret/a
+    Else/
+    Ret/b
+}
+
+// Main block
+#q1
+Pr/"=== Lu Compiler v1.1 Test ==="
+
+// var decl + set
+int n = 5
+Set/n = n + 3
+Pr/n
+
+// nested If
+If/ n > 7
+To/ Pr/"n is big"
+Elif/ n == 7
+To/ Pr/"n is seven"
+Else/
+Pr/"n is small"
+
+// Loop/N
+int sum = 0
+Loop/4 {
+    Set/sum = sum + 1
+}
+Pr/sum
+
+// ptr + alloc + free
+ptr/int p = 0
+Set/p = Alloc/int:1
+Memset/p 0 4
+Free/p
+
+Pr/"done"
+#q1:end

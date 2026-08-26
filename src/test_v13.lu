@@ -1,0 +1,113 @@
+Lu/Language
+/* v1.3 regression test: covers all bug fixes from the v1.3 patch.
+   - struct/class with array fields
+   - Set/this.field[idx] = v with multi-token index
+   - compound assignment operators
+   - enum aliases (Color c = RED)
+   - string concatenation with +, including str + int
+   - Loop/Each with body access (no spurious warnings)
+*/
+
+struct Buffer {
+    int data[256]
+    int size
+}
+
+class Stack {
+    int data[100]
+    int top
+
+    Fn/init():void {
+        Set/this.top = 0
+    }
+
+    Fn/push(int v):void {
+        Set/this.data[this.top] = v
+        Set/this.top = this.top + 1
+    }
+
+    Fn/pop():int {
+        Set/this.top = this.top - 1
+        Ret/this.data[this.top]
+    }
+
+    Fn/size():int {
+        Ret/this.top
+    }
+}
+
+enum Color {
+    RED
+    GREEN
+    BLUE
+}
+
+Fn/format(str label, int value):str {
+    Ret/label + ": " + value
+}
+
+#q1
+/* Struct with array field */
+Buffer buf
+buf.size = 0
+buf.data[0] = 100
+buf.data[1] = 200
+buf.data[2] = 300
+Pr/buf.data[0] + buf.data[1] + buf.data[2]
+
+/* Class with array field and methods */
+Stack s
+s.init()
+s.push(10)
+s.push(20)
+s.push(30)
+Pr/s.size()
+Pr/s.pop()
+Pr/s.size()
+
+/* Pointer-based class */
+ptr/Stack p = new Stack()
+p.init()
+p.push(100)
+p.push(200)
+Pr/p.size()
+Free/p
+
+/* Enum aliases */
+Color c = RED
+Pr/c
+int g = GREEN
+Pr/g
+
+/* String concatenation */
+str name = "World"
+str greeting = "Hello, " + name + "!"
+Pr/greeting
+str labeled = format("Count", 42)
+Pr/labeled
+
+/* Compound assignment */
+int x = 100
+x += 50
+x -= 25
+x *= 2
+Pr/x
+
+/* Compound on array index */
+int arr[5] = {1, 2, 3, 4, 5}
+arr[2] += 100
+Pr/arr[2]
+
+/* Compound on struct field */
+Buffer b2
+b2.size = 10
+b2.size += 5
+Pr/b2.size
+
+/* Loop/Each with body access */
+int total = 0
+Loop/Each item in arr {
+    total += item
+}
+Pr/total
+#q1:end

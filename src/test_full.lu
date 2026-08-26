@@ -1,0 +1,23 @@
+Lu/Language
+M/ us *user*
+Def:const MAX = 10
+
+#q1
+If/ 2+2 == 4
+To/ Pr/"2+2=4 ok"
+Else/
+Pr/"wrong"
+int x = 1
+Loop/3 {
+    Set/x = x + 1
+}
+Pr/x
+Loop/While x > 2 {
+    Set/x = x - 1
+}
+Pr/x
+#q1:end
+
+Fn/add(int a, int b):int {
+    Ret/a + b
+}

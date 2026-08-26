@@ -1,0 +1,46 @@
+Lu/Language
+M/ us *user*
+
+/* Core-plus regression test:
+   - function declared after use
+   - class lowered to C struct + methods
+   - C-style assignments
+   - new/delete-style heap allocation through ptr/ + new
+   - division and arrays
+*/
+
+#q1
+int a = add(8, 4)
+Pr/a
+
+int div = 8 / 2
+Pr/div
+
+int arr[3] = {1, 2, 3}
+Pr/arr[1]
+
+Vec2 v
+v.x = 6
+v.y = 7
+int total = v.sum()
+Pr/total
+
+ptr/Vec2 p = new Vec2()
+p.x = 20
+p.y = 22
+int ptotal = p.sum()
+Pr/ptotal
+Free/p
+#q1:end
+
+class Vec2 {
+    int x
+    int y
+    Fn/sum():int {
+        Ret/this.x + this.y
+    }
+}
+
+Fn/add(int x, int y):int {
+    Ret/x + y
+}

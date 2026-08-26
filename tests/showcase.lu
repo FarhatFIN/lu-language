@@ -1,0 +1,38 @@
+Lu/Language
+Import Russian
+M/ us *user*
+
+Fn/fib(int n):int {
+    If/ n <= 1 {
+        Ret/n
+    }
+
+    int a = 0
+    int b = 1
+    int i = 1
+
+    Loop/While i < n {
+        int next = a + b
+        Set/a = b
+        Set/b = next
+        Set/i = i + 1
+    }
+
+    Ret/b
+}
+
+#q1
+Pr/"=== Lu demo: Fibonacci ==="
+int target = 8
+int value = fib(target)
+Pr/"fib(8) = "
+Pr/value
+
+Pr/"countdown"
+int countdown = 3
+Loop/While countdown > 0 {
+    Pr/countdown
+    Set/countdown = countdown - 1
+}
+Pr/"done"
+#q1:end

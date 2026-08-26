@@ -1,0 +1,20 @@
+# Build artifacts
+src/luc
+src/lu_doctor
+*.o
+*.obj
+*.out
+*.exe
+
+# Generated C from .lu sources (keep checked-in references explicitly)
+*.lu.c
+
+# Temp / editor
+*.tmp
+*.swp
+.DS_Store
+src/example_out
+src/luc_self
+src/luc_self2
+src/.lu_doctor/
+src/.lu_test_build/
