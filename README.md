@@ -1,4 +1,4 @@
-# luc — Lu Language Compiler v2.1
+# luc — Lu Language Compiler v4.0
 
 **Lu** — компилируемый язык программирования с **лёгким Python-подобным синтаксисом**, **низкоуровневыми возможностями C++/asm** и **тензорной стандартной библиотекой в духе PyTorch**.  
 Транслируется в C11. Компилятор написан на C и поддерживает **самохостинг**.
@@ -6,6 +6,127 @@
 ```
 Lu/Language          →  luc  →  output.c  →  gcc  →  ./program
 ```
+
+---
+
+## Что нового в v4.0 — «Simple Core»
+
+Уровень C++ и низкого уровня — без усложнения синтаксиса.
+
+### Конструкторы с аргументами (C++-стиль)
+
+```lu
+class Vec2 {
+    int x
+    int y
+    new(int ax, int ay):void {
+        this.x = ax
+        this.y = ay
+    }
+    Fn/mag():int { Ret/this.x * this.x + this.y * this.y }
+}
+
+Vec2 a = new Vec2(1, 2)       // значение на стеке
+ptr/Vec2 p = new Vec2(3, 4)   // в куче
+auto d = new Vec2(5, 6)       // auto выводит Vec2*
+print(a.mag())                // 5
+```
+
+Вместо `new(...)` можно определять метод `Fn/init(params)` — работает одинаково.
+
+### Операторы классов + auto
+
+```lu
+op+(Vec2 other):Vec2 {
+    Vec2 r = new Vec2(this.x + other.x, this.y + other.y)
+    return r
+}
+auto c = a + b      // тип результата — класс, выведенный из op+
+```
+
+### Ошибки arity вместо молчаливого мусора
+
+```lu
+def add(int a, int b) -> int { return a + b }
+add(1, 2, 3)
+// [LU ERROR] line: 'add' expects 2 argument(s), got 3
+```
+
+Проверяются функции, методы и конструкторы.
+
+### Низкий уровень
+
+```lu
+print(sizeof(int))              // 4
+print(sizeof(arr))              // sizeof выражения
+const int K = 7                 // настоящая C-константа
+int m[2][2] = {{1, 2}, {3, 4}}  // вложенные инициализаторы
+ptr/int q = xs
+q += 2
+print(*q, q - xs)               // арифметика указателей
+```
+
+### print как в Python
+
+```lu
+print(1, 2.5, "three", True)    // → 1 2.5 three true
+```
+
+### Единый вывод типов
+
+Ошибки вида «f-строка печатает float как строку» исчезли как класс: тип
+каждого выражения теперь вычисляется одним проходом по реестру классов
+и символов (раньше — три независимые эвристики с разными слепыми зонами).
+
+---
+
+## Что нового в v3.3
+
+### def-методы в классах и структурах
+
+```lu
+class Counter {
+    int count
+    def inc(int by) -> void {
+        this.count = this.count + by
+    }
+    def get() -> int {
+        return this.count
+    }
+}
+```
+Раньше `def` в теле класса ломал codegen — методы писались только через `Fn/`.
+Теперь оба стиля работают в классах и в структурах, включая `virtual`/`override`.
+
+### Vector<T> для любых типов элементов
+
+Рантайм раньше был только для `int`. Теперь `Vector<str>`, `Vector<float>`, `Vector<bool>`, `Vector<byte>`, векторы пользовательских классов/структур — всё работает; код рантайма эмитится только для реально использованных типов.
+
+```lu
+Vector<str> names
+names.push("alice")
+print(names.get(0))   // alice
+```
+
+### Одинарные кавычки (Python-стиль)
+
+```lu
+str s = 'hello'
+print(f"val={x > 5 ? 'big' : 'small'}")   // кавычки можно вкладывать
+```
+
+### Recv/ как выражение
+
+```lu
+Chan/ch
+ch <- 42
+print(Recv/ch)   // 42 — значение больше не выбрасывается
+```
+
+### Исправления (v3.3)
+
+- `luc -v` показывал v3.0 — версия приведена к v3.3.
+- f-строки: `{v.get(i)}` для `Vector<str>` больше не печатается как int.
 
 ---
 
@@ -144,6 +265,9 @@ nums.push(30)
 print(nums.len())   // 3
 print(nums.get(0))  // 10
 print(nums.pop())   // 30
+
+Vector<str> names       // тоже работает (v3.3): str/float/bool/byte,
+names.push("alice")     // int64 и типы пользовательских классов/структур
 ```
 
 ### Умные указатели
@@ -263,7 +387,7 @@ Pr/result
 | Флаг | Описание |
 |------|----------|
 | `-o <file>` | Имя выходного C-файла |
-| `-O<0-3>` | Уровень оптимизации (по умолчанию 2) |
+| `-O<0-3>` | Уровень, записываемый в комментарий сгенерированного C (оптимизирует gcc — задавайте `-O` при сборке программы) |
 | `-d` | Режим отладки |
 | `-t` | Дамп токенов |
 | `-a` | Дамп AST |
@@ -277,9 +401,100 @@ gcc -O2 -std=c11 -o program output.c -lm
 
 ---
 
+## Пример: GUI-калькулятор на Lu (X11)
+
+`src/calculator_gui.lu` — калькулятор с окном, кнопками, мышью и клавиатурой,
+написанный **целиком на Lu**: C-библиотека подключается через
+`Import "<X11/Xlib.h>"`, вызовы (XOpenDisplay, XFillRectangle…) идут напрямую,
+растровый шрифт 3×5 и вся логика — на Lu.
+
+![Калькулятор на Lu](calculator_screenshot.png)
+
+```lu
+Lu/Language
+Import "<X11/Xlib.h>"
+
+// растровый шрифт 3×5 — 24 глифа
+int FONT[24][5] = {
+    {7, 5, 5, 5, 7},   // 0
+    {2, 6, 2, 2, 7},   // 1
+    ...
+}
+
+def apply_op(float a, float b, int op) -> float {
+    if op == 43 { return a + b }
+    if op == 47 {
+        if b == 0 {
+            err = 1
+            return 0
+        }
+        return a / b
+    }
+    return b
+}
+
+def draw_glyph(int code, int px, int py, int s) -> void {
+    for row in range(5) {
+        int bits = FONT[code][row]
+        for col in range(3) {
+            if bits & (4 >> col) {
+                XFillRectangle(g_d, g_win, g_gc, px + col * s, py + row * s, s, s)
+            }
+        }
+    }
+}
+```
+
+Сборка и запуск:
+
+```bash
+cd src
+make test-gui                          # скомпилировать и слинковать
+.lu_test_build/calculator_gui          # запустить (нужен X11-дисплей)
+# или вручную:
+./luc calculator_gui.lu -o calc.c
+gcc -O2 -std=c11 -o calc calc.c -lX11
+```
+
+Возможности: 4×5 кнопок (мышь), клавиатура (цифры, `+ - * /`, Enter/=,
+BackSpace, `c`/Escape — сброс, `n` — знак, `%` — процент), деление на ноль
+→ `Error`. Окно закрывается крестиком (WM_DELETE_WINDOW).
+
+---
+
+## Шпаргалка: C++ → Lu
+
+| C++ | Lu |
+|-----|----|
+| `Vec2 v(1, 2);` | `Vec2 v = new Vec2(1, 2)` |
+| `auto p = new Vec2(1, 2);` | `auto p = new Vec2(1, 2)` (→ `Vec2*`) |
+| `auto c = a + b;` | `auto c = a + b` (op+ выводит класс) |
+| `const int K = 7;` | `const int K = 7` |
+| `sizeof(int)` | `sizeof(int)` |
+| `int m[2][2] = {{1,2},{3,4}};` | `int m[2][2] = {{1,2},{3,4}}` |
+| `std::vector<int> v; v.push_back(5);` | `Vector<int> v` / `v.push(5)` |
+| `std::string s = a + std::to_string(42);` | `str s = "a" + 42` |
+| `std::cout << "x=" << x << "\n";` | `print("x=", x)` |
+| `struct S { void f() {...} };` | `struct S { Fn/f():void {...} }` |
+| `asm("nop");` | `asm { nop }` (AT&T) |
+| `x = cond ? a : b;` | `x = cond ? a : b` |
+| `switch (x) { case 1: ... }` | `match x { case 1 { ... } case _ { ... } }` |
+| `auto s = std::format("{}", x);` | `auto s = f"{x}"` |
+
+---
+
 ## Ключевые возможности
 
+- **Конструкторы с аргументами** (v4.0) — `new Vec2(1, 2)` для значений, указателей и `auto`
+- **Ошибки arity** (v4.0) — неверное число аргументов = ошибка компиляции
+- **sizeof / const / вложенные инициализаторы** (v4.0)
+- **print с несколькими аргументами** (v4.0) — `print(a, b, c)`
+- **Единый вывод типов** (v4.0) — поля, методы, перегрузки операторов, `auto`
 - **Python-подобный синтаксис** — `def`, `print`, `if/elif/else`, `while`, `for-in`, `break`, `continue`, `and/or/not`, `True/False/None`, `in`
+- **def-методы в классах и структурах** (v3.3) — наравне с `Fn/`
+- **Vector<T> для любых типов элементов** (v3.3) — рантайм эмитится по использованным типам
+- **Одинарные кавычки** (v3.3) — `'...'`, `f'...'`, вложение кавычек в f-строках
+- **Recv/ как выражение** (v3.3) — `print(Recv/ch)`
 - **auto / вывод типов** — компилятор сам определяет тип
 - **f-строки** — `f"value: {x}"` интерполяция, экранирование `{{ }}`
 - **Inline-asm** — `asm { ... }` (AT&T, basic asm)
@@ -309,6 +524,7 @@ Lu имеет большой недокументированный слой и�
 Chan/ch          // создать канал
 ch <- 42         // отправить значение
 Recv/ch          // получить (в codegen — lu_chan_recv)
+print(Recv/ch)   // с v3.3 Recv/ работает и как выражение
 ```
 
 **События:**
@@ -410,6 +626,7 @@ Lu содержит "игровой движок" из ранних версий
 ├── example.lu            # Учебный пример (Lu-стиль)
 ├── test_v20.lu           # Демонстрация v2.0 (Python-стиль)
 ├── lu_compiler.lu        # luc, написанный на Lu
+├── calculator_gui.lu     # GUI-калькулятор на Lu + X11 (v4.0)
 └── test_*.lu             # Тесты
 ```
 
@@ -434,4 +651,4 @@ Lu содержит "игровой движок" из ранних версий
 
 ## Лицензия
 
-Lu Compiler v2.0 · 2026
+Lu Compiler v4.0 · 2026

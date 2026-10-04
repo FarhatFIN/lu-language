@@ -1,5 +1,168 @@
 # Patch notes: Lu compiler hardening pass
 
+## v4.0 — «Simple Core»: уровень C++/asm, но проще
+
+Цель релиза: возможности C++-ООП и низкоуровневого C там, где Lu отставал,
+и упрощение типового кода — один вывод типов вместо трёх рассыпанных
+эвристик, ошибки arity вместо молчаливого мусора.
+
+### Главное: конструкторы с аргументами (как в C++)
+
+Раньше `new Type(args)` ломал компиляцию: парсер терял возвращаемый тип
+конструктора после `new(...)`, а codegen умел только примитивный
+`new int(42)` (записывал первый аргумент через `*_t = (...)`). Теперь:
+
+```lu
+class Vec2 {
+    int x
+    int y
+    new(int ax, int ay):void { this.x = ax; this.y = ay }
+}
+Vec2 a = new Vec2(1, 2)      // значение: Vec2 a; Vec2_init(&a, 1, 2);
+ptr/Vec2 p = new Vec2(3, 4)  // указатель: calloc + Vec2_init(p, 3, 4)
+auto d = new Vec2(5, 6)      // auto выводит Vec2*
+```
+
+- Конструктор — `new(params):void { }` или метод `Fn/init(params)`.
+- `auto` корректно выводит класс и указательность.
+- Работает и для структур с методами, и с наследованием (ctor базового
+  класса находится через иерархию).
+
+### Единый вывод типов (lu_type_of)
+
+Вместо трёх рассыпанных эвристик (`expr_kind_from_ast`, `infer_c_type`,
+`infer_type` в semantic) — одна функция `lu_type_of(cg, node, &is_ptr)`,
+вычисляющая Lu-тип выражения из таблицы символов и реестра классов:
+поля классов (`p.x`), методы (`p.mag()`), перегрузки операторов
+(`auto c = a + b` → класс результата!), `new`, векторные `get/pop`,
+функциональные переменные, тернарники. Старые эвристики сохранены как
+фолбэк (`expr_kind_legacy`) — ничего из того, что работало, не сломалось.
+
+### Проверка arity — ошибки компиляции, не segfault'ы
+
+```lu
+def add(int a, int b) -> int { return a + b }
+add(1, 2, 3)
+// [LU ERROR] line 5: 'add' expects 2 argument(s), got 3
+```
+
+Проверяются вызовы пользовательских функций, методы классов и
+конструкторы (`new Vec2(1)` → error). exit-код 1.
+
+### Низкий уровень: sizeof, const, вложенные инициализаторы
+
+```lu
+print(sizeof(int))            // 4 — тип или выражение
+print(sizeof(arr))            // размер массива
+const int K = 7               // C-константность для локальных и глобальных
+int m[2][2] = {{1, 2}, {3, 4}}  // вложенные скобки — раньше не парсились
+```
+
+### Проще: Python-стиль print с несколькими аргументами
+
+```lu
+print(1, 2.5, "three", True)   // → 1 2.5 three true
+```
+
+Раньше лишние аргументы молча выбрасывались.
+
+### Прочее
+
+- `luc -v` → 4.0.
+- Уточнение документации: флаг `-O0..-O3` записывает уровень в комментарий
+  сгенерированного C; оптимизирует сам gcc (флаг `-O` при сборке программы).
+
+### Попутные исправления компилятора (найдены при написании GUI-примера)
+
+Пример `src/calculator_gui.lu` — калькулятор с X11-графикой, написанный
+целиком на Lu (`Import "<X11/Xlib.h>"` + прямые вызовы C). Его написание
+вскрыло и починило пять дефектов компилятора:
+
+- **`return` перед `}` в однострочном теле** — `if x { return }` пытался
+  разобрать `}` как выражение (ошибка семантики). Теперь bare-`return`
+  распознаётся перед любым закрывающим токеном.
+- **Многострочные вложенные инициализаторы** — `int F[2][2] = {\n{1,2},\n{3,4}\n}`
+  не парсились (переводы строк внутри `{...}`); глобальные 2D-массивы
+  с переносами теперь работают.
+- **`Import "<X11/Xlib.h>"`** — угловой путь в кавычках эмитился как
+  `#include "<...>"` (несуществующий файл); теперь это системный include.
+- **Мягкий режим семантики при C-заголовках** — если в программе есть
+  `Import "<..."`/`"file.h"`, вызовы неизвестных функций и константы
+  заголовков (XOpenDisplay, Expose, XK_*) — предупреждения, а не ошибки.
+  В чистых Lu-программах опечатки по-прежнему останавливают компиляцию.
+- **`ptr/T` глобальные переменные** — эмитились после функций (неявные
+  объявления в C); теперь попадают в преамбулу глобалей.
+- **`print` с unresolved-типом** — печатал через `printf("%s", …)` любой
+  тип (segfault на long); для «auto» теперь безопасный `lu_print`
+  с `_Generic` по фактическому C-типу.
+
+### Регрессия
+
+4 новых кейса доктора: `cpp_constructors`, `op_overload_auto`,
+`sizeof_const`, `print_multiarg`. Гейт: `make clean && make && make test &&
+make test-all && make agent-test && make test-gui && ./bootstrap.sh &&
+./fuzz_test.sh` — всё зелёное (65/65, 0 предупреждений, фаззинг 100/100).
+
+### Не входит (осознанно)
+
+- Виртуальные вызовы/vtable — `virtual` по-прежнему маркер без диспетчеризации.
+- Потоки под Spawn/Chan — примитивы остались однопоточными.
+- Мономорфизация `template<T>` — по-прежнему void*.
+
+## v3.3 — OOP/stdlib consistency pass
+
+Probe pass over every README-documented feature found five places where the
+documented surface didn't match actual compiler behavior. All fixed, six new
+doctor cases.
+
+### Bugs fixed
+
+- **`def` methods inside class bodies generated invalid C** — the class parser
+  only recognised `Fn/` methods, so `def inc(int by) -> void { }` fell into the
+  field-parsing branch and emitted garbage like `def inc;` into the C struct.
+  Python-style methods now parse via the same path as top-level `def`
+  functions (extracted into `parse_def_func`) and are lowered exactly like
+  `Fn/` methods, including `virtual`/`override` prefixes.
+- **`Vector<str>` / `Vector<float>` / any non-int element type didn't compile**
+  — codegen emitted `lu_vector_str`/`lu_vector_float` calls, but the runtime
+  only ever defined `lu_vector_int`. The vector runtime is now emitted
+  monomorphically per element type actually used in the program (int, float,
+  str, bool, byte, int64, user struct/class names). Programs that use no
+  vectors get no vector runtime, mirroring the v3.2 tensor approach.
+  f-string type inference for `v.get(i)` / `v.pop()` now follows the element
+  type (was hardcoded to int — would have misprinted `Vector<str>` results).
+- **Single-quoted strings were not lexed** — `str s = 'hello'` was a syntax
+  error, and there was no way to nest quotes inside an f-string, so
+  `f"val={x > 5 ? 'big' : 'small'}"` failed. `'...'` and `f'...'` now work
+  (Python-style), with `\'` escape.
+- **`Recv/ch` received a value and threw it away** — as a statement the codegen
+  emitted `lu_chan_recv(ch);` discarding the result, and it couldn't be used as
+  an expression at all (`print(Recv/ch)` failed semantic analysis). `Recv/ch`
+  now works in expression position (values travel as `(void*)(intptr_t)`, cast
+  back on receive); the bare statement form still works.
+- **Struct bodies silently swallowed methods** — `Fn/push(int v):void { }`
+  inside a `struct` was misparsed as a field plus garbage. Structs now support
+  methods (`Fn/` and `def` forms), lowered like class methods
+  (`Struct_method(Struct *this, ...)`). Plain method-less structs keep their
+  previous simple emission.
+- **`luc -v` reported v3.0** while README/PATCH_NOTES were at v3.2 — version
+  bumped to 3.3.
+
+### Regression coverage
+
+6 new cases in the doctor suite: `def_methods_in_class`, `struct_methods`,
+`vector_str`, `vector_float`, `single_quoted_strings`, `recv_expression`.
+Gate: `make clean && make && make test && make test-all && make agent-test &&
+./bootstrap.sh && ./fuzz_test.sh` — all green (61/61 doctor cases, fuzz
+100 rounds: 0 crashes / 0 timeouts).
+
+### Still known limitations (unchanged)
+
+- `Vector<T>` with nested/pointer elements (`Vector<Vector<int>>`,
+  `Vector<int*>`) is unsupported — collection skips them, so they fail the
+  same way as before rather than silently changing.
+- Vector auto-init still requires the declaration to have no initialiser.
+
 ## v3.2 — Bug fixes + Python logic words + inline asm + Tensor stdlib
 
 ### Bugs fixed

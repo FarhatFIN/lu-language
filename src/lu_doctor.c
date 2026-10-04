@@ -946,6 +946,175 @@ int main(void) {
             "  tensor_free(e)\n"
             "}\n",
             "2\n5\n2\n"
+        },
+        /* v3.3 iteration: Python-style def methods in class bodies */
+        {
+            "def_methods_in_class",
+            "Lu/Language\n"
+            "class Counter {\n"
+            "  int count\n"
+            "  def inc(int by) -> void {\n"
+            "    this.count = this.count + by\n"
+            "  }\n"
+            "  def get() -> int {\n"
+            "    return this.count\n"
+            "  }\n"
+            "}\n"
+            "def main() -> void {\n"
+            "  Counter cnt\n"
+            "  cnt.inc(5)\n"
+            "  cnt.inc(7)\n"
+            "  print(cnt.get())\n"
+            "}\n",
+            "12\n"
+        },
+        /* v3.3 iteration: methods in struct bodies */
+        {
+            "struct_methods",
+            "Lu/Language\n"
+            "struct Stack {\n"
+            "  int data[16]\n"
+            "  int top\n"
+            "  Fn/push(int v):void {\n"
+            "    Set/this.data[this.top] = v\n"
+            "    Set/this.top = this.top + 1\n"
+            "  }\n"
+            "  Fn/pop():int {\n"
+            "    Set/this.top = this.top - 1\n"
+            "    Ret/this.data[this.top]\n"
+            "  }\n"
+            "}\n"
+            "def main() -> void {\n"
+            "  Stack st\n"
+            "  st.push(11)\n"
+            "  st.push(22)\n"
+            "  print(st.pop())\n"
+            "  print(st.pop())\n"
+            "}\n",
+            "22\n11\n"
+        },
+        /* v3.3 iteration: Vector<T> runtime for non-int element types */
+        {
+            "vector_str",
+            "Lu/Language\n"
+            "def main() -> void {\n"
+            "  Vector<str> names\n"
+            "  names.push(\"alice\")\n"
+            "  names.push(\"bob\")\n"
+            "  print(names.len())\n"
+            "  print(names.get(1))\n"
+            "}\n",
+            "2\nbob\n"
+        },
+        {
+            "vector_float",
+            "Lu/Language\n"
+            "def main() -> void {\n"
+            "  Vector<float> vals\n"
+            "  vals.push(1.5)\n"
+            "  vals.push(2.5)\n"
+            "  print(vals.get(0) + vals.get(1))\n"
+            "  print(vals.len())\n"
+            "}\n",
+            "4\n2\n"
+        },
+        /* v3.3 iteration: single-quoted strings + nested quotes in f-strings */
+        {
+            "single_quoted_strings",
+            "Lu/Language\n"
+            "def main() -> void {\n"
+            "  str a = 'single'\n"
+            "  print(a)\n"
+            "  print(len('abcd'))\n"
+            "  int x = 7\n"
+            "  print(f\"val={x > 5 ? 'big' : 'small'}\")\n"
+            "}\n",
+            "single\n4\nval=big\n"
+        },
+        /* v3.3 iteration: Recv/ as an expression (value, not discarded) */
+        {
+            "recv_expression",
+            "Lu/Language\n"
+            "def main() -> void {\n"
+            "  Chan/ch\n"
+            "  ch <- 42\n"
+            "  print(Recv/ch)\n"
+            "}\n",
+            "42\n"
+        },
+        /* v4.0 iteration: C++-style constructors with arguments */
+        {
+            "cpp_constructors",
+            "Lu/Language\n"
+            "class Vec2 {\n"
+            "  int x\n"
+            "  int y\n"
+            "  new(int ax, int ay):void {\n"
+            "    this.x = ax\n"
+            "    this.y = ay\n"
+            "  }\n"
+            "  Fn/mag():int {\n"
+            "    Ret/this.x * this.x + this.y * this.y\n"
+            "  }\n"
+            "}\n"
+            "def main() -> void {\n"
+            "  Vec2 a = new Vec2(3, 4)\n"
+            "  ptr/Vec2 p = new Vec2(5, 6)\n"
+            "  auto d = new Vec2(6, 8)\n"
+            "  print(a.mag())\n"
+            "  print(p.mag())\n"
+            "  print(d.mag())\n"
+            "}\n",
+            "25\n61\n100\n"
+        },
+        /* v4.0 iteration: operator overloads unify with auto inference */
+        {
+            "op_overload_auto",
+            "Lu/Language\n"
+            "class Vec2 {\n"
+            "  int x\n"
+            "  int y\n"
+            "  new(int ax, int ay):void {\n"
+            "    this.x = ax\n"
+            "    this.y = ay\n"
+            "  }\n"
+            "  op+(Vec2 other):Vec2 {\n"
+            "    Vec2 r = new Vec2(this.x + other.x, this.y + other.y)\n"
+            "    return r\n"
+            "  }\n"
+            "}\n"
+            "def main() -> void {\n"
+            "  Vec2 a = new Vec2(1, 2)\n"
+            "  Vec2 b = new Vec2(10, 20)\n"
+            "  auto c = a + b\n"
+            "  print(c.x)\n"
+            "  print(c.y)\n"
+            "}\n",
+            "11\n22\n"
+        },
+        /* v4.0 iteration: sizeof, const, nested array initializers */
+        {
+            "sizeof_const",
+            "Lu/Language\n"
+            "def main() -> void {\n"
+            "  print(sizeof(int))\n"
+            "  const int K = 7\n"
+            "  print(K)\n"
+            "  int m[2][2] = {{1, 2}, {3, 4}}\n"
+            "  print(m[1][1] + sizeof(K) - 4)\n"
+            "}\n",
+            "4\n7\n4\n"
+        },
+        /* v4.0 iteration: Python-style multi-argument print */
+        {
+            "print_multiarg",
+            "Lu/Language\n"
+            "def main() -> void {\n"
+            "  print(1, 2.5, \"three\", True)\n"
+            "  print()\n"
+            "  print(\"done\")\n"
+            "}\n",
+            "1 2.5 three true\n\ndone\n"
         }
     };
     int total = (int)(sizeof(cases) / sizeof(cases[0]));

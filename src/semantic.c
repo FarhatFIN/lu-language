@@ -39,8 +39,12 @@ static Symbol *sym_find_in_scope(SymTable *st, const char *name, int scope) {
 
 static bool semantic_is_class_like(NodeKind k) {
     return k == NODE_CLASS_DECL || k == NODE_INTERFACE_DECL ||
-           k == NODE_IMPL_DECL || k == NODE_TEMPLATE_DECL;
+           k == NODE_IMPL_DECL || k == NODE_TEMPLATE_DECL ||
+           k == NODE_STRUCT_DECL;
 }
+
+/* Программа импортирует C-заголовки — есть функции вне symtab (X11 и т.п.) */
+static bool g_has_c_headers = false;
 
 static bool semantic_is_method_like(NodeKind k) {
     return k == NODE_METHOD_DECL || k == NODE_CONSTRUCTOR ||
@@ -296,6 +300,11 @@ static void first_pass(ASTNode *node, SymTable *st, BlockRegistry *br) {
             sym_add(st, node->sval, node->type_name ? node->type_name : "void",
                     -1, false, true, false, node->line);
     }
+    if (node->kind == NODE_CHAN_DECL && node->sval) {
+        /* channels are lu_chan_t* — register so `Recv/ch` and friends type-check */
+        if (!sym_find(st, node->sval))
+            sym_add(st, node->sval, "chan", -1, true, false, false, node->line);
+    }
     if (node->kind == NODE_DEF_CONST && node->sval) {
         if (!sym_find(st, node->sval))
             sym_add(st, node->sval, "int", -1, false, false, true, node->line);
@@ -384,7 +393,8 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
     case NODE_CLASS_DECL:
     case NODE_INTERFACE_DECL:
     case NODE_IMPL_DECL:
-    case NODE_TEMPLATE_DECL: {
+    case NODE_TEMPLATE_DECL:
+    case NODE_STRUCT_DECL: {
         const char *cn = node->sval ? node->sval : "LuClass";
         int class_scope = node->line;
         if (!sym_find(st, cn))
@@ -494,7 +504,11 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
                        strncmp(node->sval, "_q", 2)    != 0) {
                 if (!sym_find(st, node->sval)) {
                     lu_warn(node->line, "call to undeclared function '%s'", node->sval);
-                    g_parse_error_count++;
+                    /* C headers (Import "<...>") bring arbitrary functions the
+                       compiler cannot see — unresolved calls stay a soft warning
+                       there; in pure Lu programs they remain errors (typo catch). */
+                    if (!g_has_c_headers)
+                        g_parse_error_count++;
                 }
             }
         }
@@ -516,7 +530,9 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
             }
             if (!sym_find(st, base)) {
                 lu_warn(node->line, "use of undeclared identifier '%s'", node->sval);
-                g_parse_error_count++;
+                /* same soft policy as functions: C headers bring constants */
+                if (!g_has_c_headers)
+                    g_parse_error_count++;
             }
         }
         break;
@@ -743,6 +759,16 @@ bool semantic_check(ASTNode *root, SymTable *st) {
     sym_add(st, "ERR_AUTH", "int", -1, false, false, true, 0);
 
     BlockRegistry br = {0};
+
+    /* C headers bring functions the compiler cannot see — unresolved
+       calls in such programs are soft warnings, not errors. */
+    g_has_c_headers = false;
+    for (int i = 0; i < root->children.count; i++) {
+        ASTNode *n = root->children.items[i];
+        if (n->kind == NODE_IMPORT && n->sval &&
+            (n->sval[0] == '<' || n->sval[0] == '"'))
+            g_has_c_headers = true;
+    }
 
     /* ── Pass 1: collect all declarations forward ── */
     first_pass(root, st, &br);

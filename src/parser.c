@@ -370,6 +370,34 @@ static ASTNode *parse_primary(Parser *p) {
         return n;
     }
 
+    /* Recv/ch as an expression — yields the value received from the channel */
+    if (t->type == TOK_CHAN_RECV) {
+        consume(p);
+        ASTNode *n = node_new(NODE_CHAN_RECV, line);
+        n->sval = lu_strdup(cur(p)->value); consume(p); /* channel name */
+        return n;
+    }
+
+    /* sizeof(type) or sizeof(expr) — low-level size query (v4.0) */
+    if (t->type == TOK_IDENT && t->value && !strcmp(t->value, "sizeof") &&
+        peek_tok(p, 1)->type == TOK_LPAREN) {
+        consume(p); /* sizeof */
+        consume(p); /* ( */
+        ASTNode *n = node_new(NODE_EXPR_UNOP, line);
+        n->op = lu_strdup("sizeof");
+        /* Type form: the parenthesised token is a type keyword/identifier
+           and is followed by ')' or a pointer '*' — e.g. sizeof(int),
+           sizeof(Vec2), sizeof(int*). Otherwise treat as an expression. */
+        if ((is_type_tok(cur(p)->type) || check(p, TOK_QUESTION)) &&
+            (peek_tok(p, 1)->type == TOK_RPAREN || peek_tok(p, 1)->type == TOK_STAR)) {
+            n->type_name = consume_type(p);
+        } else {
+            node_list_add(&n->children, parse_expr(p));
+        }
+        match(p, TOK_RPAREN);
+        return n;
+    }
+
     /* Alloc/ used as expression: Alloc/type:count */
     if (t->type == TOK_ALLOC) {
         consume(p);
@@ -769,7 +797,13 @@ static ASTNode *parse_import_like(Parser *p, NodeKind kind, int line) {
 
     if (check(p, TOK_STR_LIT)) {
         char buf[512];
-        snprintf(buf, sizeof(buf), "\"%s\"", cur(p)->value ? cur(p)->value : "");
+        const char *sv = cur(p)->value ? cur(p)->value : "";
+        /* Import "<X11/Xlib.h>" — quotes around an angle include: keep the
+           angle form so it lands as a system #include, not "#include <...>" */
+        if (sv[0] == '<' && sv[strlen(sv) - 1] == '>')
+            snprintf(buf, sizeof(buf), "%s", sv);
+        else
+            snprintf(buf, sizeof(buf), "\"%s\"", sv);
         n->sval = lu_strdup(buf);
         consume(p);
     } else if (check(p, TOK_LT)) {
@@ -986,6 +1020,41 @@ static ASTNode *parse_func(Parser *p, bool is_async) {
     return n;
 }
 
+/* Python-style function declaration: def name(params) -> Type { }
+   The current token must be `def`. Handles both `:Type` and `-> Type`
+   return-type forms. Also used for def-methods inside class/struct
+   bodies (the caller re-kinds the node to NODE_METHOD_DECL). */
+static ASTNode *parse_def_func(Parser *p) {
+    int line = cur(p)->line;
+    consume(p); /* eat 'def' */
+    ASTNode *n = node_new(NODE_FUNC_DECL, line);
+    if (check(p, TOK_IDENT)) { n->sval = lu_strdup(cur(p)->value); consume(p); }
+    match(p, TOK_LPAREN);
+    parse_params(p, n);
+    match(p, TOK_RPAREN);
+    /* return type: :Type or -> Type (-> is TOK_PTR_ACCESS in our lexer) */
+    if (match(p, TOK_COLON)) n->type_name = consume_type(p);
+    else if (match(p, TOK_PTR_ACCESS)) n->type_name = consume_type(p);
+    else if (match(p, TOK_ARROW)) n->type_name = consume_type(p);
+    skip_newlines(p);
+    if (match(p, TOK_LBRACE)) {
+        ASTNode *body = node_new(NODE_PROGRAM, line);
+        skip_newlines(p);
+        while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+            skip_newlines(p);
+            if (check(p, TOK_RBRACE)) break;
+            int pos_before = p->pos;
+            ASTNode *s = parse_statement(p);
+            if (s) node_list_add(&body->children, s);
+            opt_newline(p);
+            if (p->pos == pos_before) consume(p); /* safety: never stall */
+        }
+        match(p, TOK_RBRACE);
+        node_list_add(&n->children, body);
+    }
+    return n;
+}
+
 static ASTNode *parse_try(Parser *p) {
     int line = cur(p)->line; consume(p);
     ASTNode *n = node_new(NODE_TRY, line);
@@ -1131,7 +1200,11 @@ static ASTNode *parse_class(Parser *p) {
                 node_list_add(&ctor->children, param);
                 match(p, TOK_COMMA);
             }
-            match(p, TOK_RPAREN); match(p, TOK_COLON);
+            match(p, TOK_RPAREN);
+            /* optional return type: new(...):void / new(...) -> void —
+               без этого 'void' оставался в потоке и ломал тело конструктора */
+            if (match(p, TOK_COLON) || match(p, TOK_PTR_ACCESS) || match(p, TOK_ARROW))
+                consume_type(p);
             skip_newlines(p); match(p, TOK_LBRACE); skip_newlines(p);
             ASTNode *body = node_new(NODE_PROGRAM, mline);
             while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -1176,6 +1249,18 @@ static ASTNode *parse_class(Parser *p) {
 
         if (check(p, TOK_FUNC)) {
             ASTNode *method = parse_func(p, false);
+            method->kind = NODE_METHOD_DECL;
+            method->annot = lu_strdup(access);
+            if (is_virtual)  method->bval = true;
+            if (is_override) method->ival = 1;
+            node_list_add(&n->children, method);
+            opt_newline(p); continue;
+        }
+
+        /* Python-style method: def name(params) -> Type { } */
+        if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "def") &&
+            peek_tok(p, 1)->type == TOK_IDENT && peek_tok(p, 2)->type == TOK_LPAREN) {
+            ASTNode *method = parse_def_func(p);
             method->kind = NODE_METHOD_DECL;
             method->annot = lu_strdup(access);
             if (is_virtual)  method->bval = true;
@@ -1252,6 +1337,25 @@ static ASTNode *parse_struct(Parser *p) {
         skip_newlines(p);
         if (check(p, TOK_RBRACE)) break;
         int pos_before = p->pos;
+
+        /* Methods in struct bodies (Fn/ and Python-style def) — lowered
+           like class methods: Struct_method(Struct *this, ...). */
+        if (check(p, TOK_FUNC)) {
+            ASTNode *method = parse_func(p, false);
+            method->kind = NODE_METHOD_DECL;
+            method->annot = lu_strdup("pub");
+            node_list_add(&n->children, method);
+            opt_newline(p); continue;
+        }
+        if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "def") &&
+            peek_tok(p, 1)->type == TOK_IDENT && peek_tok(p, 2)->type == TOK_LPAREN) {
+            ASTNode *method = parse_def_func(p);
+            method->kind = NODE_METHOD_DECL;
+            method->annot = lu_strdup("pub");
+            node_list_add(&n->children, method);
+            opt_newline(p); continue;
+        }
+
         ASTNode *field = node_new(NODE_VAR_DECL, cur(p)->line);
         field->type_name = consume_type(p);
         if (is_type_tok(cur(p)->type) || check(p, TOK_IDENT)) {
@@ -1422,13 +1526,36 @@ static ASTNode *parse_var_decl(Parser *p) {
         ndims++;
     }
     n->ival = ndims;  /* number of dimensions (0 = not an array) */
-    /* optional initialiser {a, b, c} */
+    /* optional initialiser {a, b, c} — supports nested braces and newlines:
+       int m[2][2] = {{1, 2}, {3, 4}}
+       int F[2][2] = {
+           {1, 2},
+           {3, 4}
+       } */
     if (match(p, TOK_ASSIGN)) {
         if (match(p, TOK_LBRACE)) {
             while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
-                node_list_add(&n->children, parse_expr(p));
+                skip_newlines(p);
+                if (check(p, TOK_RBRACE) || check(p, TOK_EOF)) break;
+                if (check(p, TOK_LBRACE)) {
+                    /* nested list — reuse the list-literal node */
+                    ASTNode *sub = node_new(NODE_EXPR_INDEX, cur(p)->line);
+                    sub->op = lu_strdup("list");
+                    consume(p); /* { */
+                    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                        skip_newlines(p);
+                        if (check(p, TOK_RBRACE) || check(p, TOK_EOF)) break;
+                        node_list_add(&sub->children, parse_expr(p));
+                        match(p, TOK_COMMA);
+                    }
+                    match(p, TOK_RBRACE);
+                    node_list_add(&n->children, sub);
+                } else {
+                    node_list_add(&n->children, parse_expr(p));
+                }
                 match(p, TOK_COMMA);
             }
+            skip_newlines(p);
             match(p, TOK_RBRACE);
         } else {
             /* = expr (non-array initialiser) */
@@ -2045,34 +2172,7 @@ static ASTNode *parse_statement(Parser *p) {
 
         /* def name(args):Type { } or def name(args) -> Type { } — function declaration */
         if (!strcmp(v, "def")) {
-            consume(p); /* eat 'def' */
-            /* Temporarily transform into Fn/ parsing by reading name and calling parse_func-like logic */
-            ASTNode *n = node_new(NODE_FUNC_DECL, line);
-            if (check(p, TOK_IDENT)) { n->sval = lu_strdup(cur(p)->value); consume(p); }
-            match(p, TOK_LPAREN);
-            parse_params(p, n);
-            match(p, TOK_RPAREN);
-            /* return type: :Type or -> Type (-> is TOK_PTR_ACCESS in our lexer) */
-            if (match(p, TOK_COLON)) n->type_name = consume_type(p);
-            else if (match(p, TOK_PTR_ACCESS)) n->type_name = consume_type(p);
-            else if (match(p, TOK_ARROW)) n->type_name = consume_type(p);
-            skip_newlines(p);
-            if (match(p, TOK_LBRACE)) {
-                ASTNode *body = node_new(NODE_PROGRAM, line);
-                skip_newlines(p);
-                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
-                    skip_newlines(p);
-                    if (check(p, TOK_RBRACE)) break;
-                    int pos_before = p->pos;
-                    ASTNode *s = parse_statement(p);
-                    if (s) node_list_add(&body->children, s);
-                    opt_newline(p);
-                    if (p->pos == pos_before) consume(p);
-                }
-                match(p, TOK_RBRACE);
-                node_list_add(&n->children, body);
-            }
-            return n;
+            return parse_def_func(p);
         }
 
         /* print expr  or  print(expr)  — Python-style print */
@@ -2099,13 +2199,27 @@ static ASTNode *parse_statement(Parser *p) {
             }
         }
 
-        /* return expr  or  return — Python/C-style return */
+        /* return expr  or  return — Python/C-style return.
+           Bare `return` must not try to parse an expression before a
+           closing token: `if x { return }` on one line. */
         if (!strcmp(v, "return")) {
             consume(p);
             ASTNode *n = node_new(NODE_RETURN, line);
-            if (!check(p, TOK_NEWLINE) && !check(p, TOK_EOF))
+            TokenType nt = peek_tok(p, 0)->type;
+            if (!check(p, TOK_NEWLINE) && !check(p, TOK_EOF) &&
+                nt != TOK_RBRACE && nt != TOK_RPAREN && nt != TOK_RBRACKET &&
+                nt != TOK_COMMA && nt != TOK_SEMICOLON)
                 node_list_add(&n->children, parse_expr(p));
             return n;
+        }
+
+        /* const Type name = expr — C-style immutable declaration (v4.0) */
+        if (!strcmp(v, "const") &&
+            (is_type_tok(peek_tok(p, 1)->type) || !strcmp(peek_tok(p, 1)->value ? peek_tok(p, 1)->value : "", "auto"))) {
+            consume(p); /* eat 'const' */
+            ASTNode *vd = parse_var_decl(p);
+            vd->annot = lu_strdup("const");
+            return vd;
         }
 
         /* auto name = expr — type inference */

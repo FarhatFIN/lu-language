@@ -326,6 +326,32 @@ Free/p
 #q1:end
 ```
 
+**Конструкторы с аргументами (v4.0, C++-стиль):**
+
+Конструктор — метод `new` (или `Fn/init`) с параметрами. Теперь `new` принимает
+аргументы, а `auto` выводит тип:
+
+```lu
+#q1
+class Point {
+    int x
+    int y
+    new(int ax, int ay):void {
+        this.x = ax
+        this.y = ay
+    }
+}
+
+Point a = new Point(3, 4)   // значение на стеке
+auto p = new Point(5, 6)    // p — указатель Point*
+print(a.x, a.y)             // 3 4
+print(p.x, p.y)             // 5 6
+#q1:end
+```
+
+Число аргументов проверяется при компиляции: `new Point(1)` — ошибка
+`'Point' expects 2 argument(s), got 1`.
+
 ---
 
 ## Урок 9: Стандартная библиотека
@@ -394,6 +420,45 @@ print(nums.get(2))   // 30
 print(nums.pop())    // 30
 print(nums.len())    // 2
 #q1:end
+```
+
+Элементом может быть не только `int` (с v3.3):
+
+```lu
+#q1
+Vector<str> names
+names.push("alice")
+names.push("bob")
+print(names.get(1))   // bob
+
+Vector<float> vals
+vals.push(1.5)
+vals.push(2.5)
+print(vals.get(0) + vals.get(1))   // 4
+#q1:end
+```
+
+Рантайм для каждого типа элементов эмитится в C только если вы его реально использовали.
+
+### Методы классов и структур в двух стилях
+
+В телах `class` и `struct` можно писать методы и через `Fn/`, и через `def` — они эквивалентны:
+
+```lu
+class Counter {
+    int count
+    Fn/inc(int by):void {
+        Set/this.count = this.count + by
+    }
+    def get() -> int {
+        return this.count
+    }
+}
+
+Counter c
+c.inc(5)
+c.inc(7)
+print(c.get())   // 12
 ```
 
 ---

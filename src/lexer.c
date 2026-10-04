@@ -63,12 +63,13 @@ static char *read_word(Lexer *l) {
     return w;
 }
 
-/* read quoted string «...» or "..." or """...""" */
+/* read quoted string «...» or "..." or """...""" or '...' */
 static char *read_string(Lexer *l) {
     char buf[4096];
     int bi = 0;
     bool triple = false;
     bool guillemet = false;
+    bool single = false;
 
     /* Opening delimiter. The caller must leave the lexer positioned at it. */
     if (cur(l) == '"' && peek(l, 1) == '"' && peek(l, 2) == '"') {
@@ -77,6 +78,9 @@ static char *read_string(Lexer *l) {
     } else if ((unsigned char)cur(l) == 0xC2 && (unsigned char)peek(l, 1) == 0xAB) {
         guillemet = true; /* « */
         advance(l); advance(l);
+    } else if (cur(l) == '\'') {
+        single = true;
+        advance(l);
     } else if (cur(l) == '"') {
         advance(l);
     }
@@ -90,7 +94,11 @@ static char *read_string(Lexer *l) {
             advance(l); advance(l); /* » */
             break;
         }
-        if (!triple && !guillemet && cur(l) == '"') {
+        if (single && cur(l) == '\'') {
+            advance(l);
+            break;
+        }
+        if (!triple && !guillemet && !single && cur(l) == '"') {
             advance(l);
             break;
         }
@@ -105,6 +113,7 @@ static char *read_string(Lexer *l) {
                 case 'r':  buf[bi++] = '\r'; break;
                 case '\\': buf[bi++] = '\\'; break;
                 case '"':  buf[bi++] = '"'; break;
+                case '\'': buf[bi++] = '\''; break;
                 case '0':  buf[bi++] = '\0'; break;
                 default:
                     buf[bi++] = '\\';
@@ -281,11 +290,23 @@ Token *lexer_tokenize(Lexer *l, int *out_count) {
             tl_add(&tl, make_tok(TOK_STR_LIT, s, line, col)); free(s); continue;
         }
 
-        /* ── f-string: f"..." or f«...» — interpolation like Python ── */
+        /* ── Single-quoted string '...' (Python-style) ── */
+        if (c == '\'') {
+            char *s = read_string(l);
+            tl_add(&tl, make_tok(TOK_STR_LIT, s, line, col)); free(s); continue;
+        }
+
+        /* ── f-string: f"..." / f'...' or f«...» — interpolation like Python ── */
         if (c == 'f' && peek(l, 1) == '"') {
             advance(l); /* skip 'f' */
             char *s = read_string(l);
             /* Mark as f-string by prefixing $f */
+            char buf[4200]; snprintf(buf, sizeof(buf), "$f%s", s);
+            tl_add(&tl, make_tok(TOK_STR_LIT, buf, line, col)); free(s); continue;
+        }
+        if (c == 'f' && peek(l, 1) == '\'') {
+            advance(l); /* skip 'f' */
+            char *s = read_string(l);
             char buf[4200]; snprintf(buf, sizeof(buf), "$f%s", s);
             tl_add(&tl, make_tok(TOK_STR_LIT, buf, line, col)); free(s); continue;
         }

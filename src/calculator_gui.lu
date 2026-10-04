@@ -1,0 +1,393 @@
+Lu/Language
+
+// ─────────────────────────────────────────────────────────────
+// Lu GUI Calculator — калькулятор на Lu с графикой (X11)
+//
+// Сборка и запуск:
+//   ./luc calculator_gui.lu -o calculator_gui.c
+//   gcc -O2 -std=c11 -o calculator_gui calculator_gui.c -lX11
+//   ./calculator_gui
+//
+// Мышь: клик по кнопкам.  Клавиатура: 0-9 . + - * / = Enter,
+// BackSpace, c/C/Escape — сброс, n — смена знака, % — процент.
+// ─────────────────────────────────────────────────────────────
+
+Import "<X11/Xlib.h>"
+Import "<X11/keysym.h>"
+
+// ── Геометрия ──
+const int WIN_W = 320
+const int WIN_H = 394
+const int DISP_H = 70
+const int BTN_X = 2
+const int BTN_Y = 74
+const int BTN_W = 77
+const int BTN_H = 62
+const int BTN_STEP_X = 79
+const int BTN_STEP_Y = 64
+
+// ── Состояние калькулятора ──
+byte disp[32]          // текущий ввод (C-строка)
+int disp_len = 1
+float acc = 0         // накопитель
+int pending = 0        // ожидающая операция: 0 или '+' '-' '*' '/'
+int fresh = 1          // следующая цифра начинает новый ввод
+int err = 0            // 1 = показываем Error
+
+// ── X11 (заполняется в main) ──
+ptr/Display g_d = 0
+Window g_win = 0
+GC g_gc = 0
+
+// ── Шрифт 3×5: 24 глифа, 3 бита на строку (старший бит — левый столбец) ──
+// 0-9, + - * / = . C < % ± E r o и пустой
+int FONT[24][5] = {
+    {7, 5, 5, 5, 7},   // 0
+    {2, 6, 2, 2, 7},   // 1
+    {7, 1, 7, 4, 7},   // 2
+    {7, 1, 7, 1, 7},   // 3
+    {5, 5, 7, 1, 1},   // 4
+    {7, 4, 7, 1, 7},   // 5
+    {7, 4, 7, 5, 7},   // 6
+    {7, 1, 1, 2, 2},   // 7
+    {7, 5, 7, 5, 7},   // 8
+    {7, 5, 7, 1, 7},   // 9
+    {0, 2, 7, 2, 0},   // 10 +
+    {0, 0, 7, 0, 0},   // 11 -
+    {5, 2, 7, 2, 5},   // 12 *
+    {1, 1, 2, 4, 4},   // 13 /
+    {0, 7, 0, 7, 0},   // 14 =
+    {0, 0, 0, 0, 2},   // 15 .
+    {7, 4, 4, 4, 7},   // 16 C
+    {4, 6, 7, 6, 4},   // 17 <  (backspace)
+    {5, 1, 2, 4, 5},   // 18 %
+    {0, 2, 7, 0, 7},   // 19 ±
+    {7, 4, 7, 4, 7},   // 20 E
+    {0, 6, 5, 6, 0},   // 21 r
+    {0, 2, 5, 2, 0},   // 22 o
+    {0, 0, 0, 0, 0}    // 23 пробел
+}
+
+// ── Раскладка кнопок 4×5: код глифа == код действия ──
+int BTN[20] = {
+    16, 17, 18, 13,     // C  <  %  /
+    7, 8, 9, 12,        // 7  8  9  *
+    4, 5, 6, 11,        // 4  5  6  -
+    1, 2, 3, 10,        // 1  2  3  +
+    19, 0, 15, 14       // ±  0  .  =
+}
+
+// ─────────────────────────────────────────────────────────────
+// Логика калькулятора
+// ─────────────────────────────────────────────────────────────
+
+def reset_all() -> void {
+    disp[0] = 48
+    disp[1] = 0
+    disp_len = 1
+    acc = 0
+    pending = 0
+    fresh = 1
+    err = 0
+}
+
+def apply_op(float a, float b, int op) -> float {
+    if op == 43 { return a + b }
+    if op == 45 { return a - b }
+    if op == 42 { return a * b }
+    if op == 47 {
+        if b == 0 {
+            err = 1
+            return 0
+        }
+        return a / b
+    }
+    return b
+}
+
+def show_error() -> void {
+    disp[0] = 69      // E
+    disp[1] = 114     // r
+    disp[2] = 114     // r
+    disp[3] = 111     // o
+    disp[4] = 114     // r
+    disp[5] = 0
+    disp_len = 5
+}
+
+def show_result(float v) -> void {
+    if err == 1 {
+        show_error()
+        return
+    }
+    snprintf((str)disp, 32, "%g", v)
+    disp_len = len((str)disp)
+    if disp_len == 0 {
+        reset_all()
+    }
+}
+
+def press_digit(int d) -> void {
+    if err == 1 { reset_all() }
+    if fresh == 1 {
+        disp_len = 0
+        fresh = 0
+    }
+    if disp_len >= 24 { return }
+    disp[disp_len] = 48 + d
+    disp_len += 1
+    disp[disp_len] = 0
+}
+
+def press_dot() -> void {
+    if err == 1 { reset_all() }
+    if fresh == 1 {
+        disp_len = 0
+        fresh = 0
+        disp[disp_len] = 48
+        disp_len += 1
+        disp[disp_len] = 0
+    }
+    if contains((str)disp, ".") == 0 and disp_len < 24 {
+        disp[disp_len] = 46
+        disp_len += 1
+        disp[disp_len] = 0
+    }
+}
+
+def press_op(int op) -> void {
+    if err == 1 { reset_all() }
+    if pending != 0 and fresh == 0 {
+        acc = apply_op(acc, atof((str)disp), pending)
+        if err == 1 {
+            pending = 0
+            fresh = 1
+            return
+        }
+        show_result(acc)
+    } elif fresh == 0 {
+        acc = atof((str)disp)
+    }
+    pending = op
+    fresh = 1
+}
+
+def press_equals() -> void {
+    if err == 1 { return }
+    if pending != 0 {
+        acc = apply_op(acc, atof((str)disp), pending)
+        pending = 0
+        show_result(acc)
+        fresh = 1
+    }
+}
+
+def press_clear() -> void {
+    reset_all()
+}
+
+def press_back() -> void {
+    if err == 1 {
+        reset_all()
+        return
+    }
+    if fresh == 1 { return }
+    if disp_len > 1 {
+        disp_len -= 1
+        disp[disp_len] = 0
+    } else {
+        reset_all()
+    }
+}
+
+def press_percent() -> void {
+    if err == 1 { return }
+    float v = atof((str)disp) / 100.0
+    show_result(v)
+    fresh = 1
+}
+
+def press_negate() -> void {
+    if err == 1 { return }
+    if strcmp((str)disp, "0") == 0 { return }
+    if disp[0] == 45 {
+        // убрать ведущий '-'
+        for i in range(disp_len - 1) {
+            disp[i] = disp[i + 1]
+        }
+        disp_len -= 1
+        disp[disp_len] = 0
+    } else {
+        if disp_len < 24 {
+            for i in range(disp_len) {
+                disp[disp_len - i] = disp[disp_len - i - 1]
+            }
+            disp[0] = 45
+            disp_len += 1
+            disp[disp_len] = 0
+        }
+    }
+}
+
+def handle_action(int act) -> void {
+    if act <= 9 { press_digit(act) }
+    elif act == 10 { press_op(43) }
+    elif act == 11 { press_op(45) }
+    elif act == 12 { press_op(42) }
+    elif act == 13 { press_op(47) }
+    elif act == 14 { press_equals() }
+    elif act == 15 { press_dot() }
+    elif act == 16 { press_clear() }
+    elif act == 17 { press_back() }
+    elif act == 18 { press_percent() }
+    elif act == 19 { press_negate() }
+}
+
+def handle_key(long k) -> void {
+    if k >= 48 and k <= 57 { press_digit((int)(k - 48)) }
+    elif k >= 65456 and k <= 65465 { press_digit((int)(k - 65456)) }
+    elif k == 46 or k == 65454 { press_dot() }
+    elif k == 43 or k == 65451 { press_op(43) }
+    elif k == 45 or k == 65453 { press_op(45) }
+    elif k == 42 or k == 65450 { press_op(42) }
+    elif k == 47 or k == 65455 { press_op(47) }
+    elif k == 61 or k == 65293 or k == 65421 { press_equals() }
+    elif k == 65288 { press_back() }
+    elif k == 99 or k == 67 or k == 65307 { press_clear() }
+    elif k == 37 { press_percent() }
+    elif k == 110 { press_negate() }
+}
+
+// ─────────────────────────────────────────────────────────────
+// Отрисовка
+// ─────────────────────────────────────────────────────────────
+
+def char_code(int c) -> int {
+    if c >= 48 and c <= 57 { return c - 48 }
+    if c == 46 { return 15 }
+    if c == 45 { return 11 }
+    if c == 43 { return 10 }
+    if c == 42 { return 12 }
+    if c == 47 { return 13 }
+    if c == 61 { return 14 }
+    if c == 37 { return 18 }
+    if c == 69 { return 20 }
+    if c == 111 { return 22 }
+    if c == 114 { return 21 }
+    return 23
+}
+
+def draw_glyph(int code, int px, int py, int s) -> void {
+    if code < 0 or code > 23 { return }
+    for row in range(5) {
+        int bits = FONT[code][row]
+        for col in range(3) {
+            if bits & (4 >> col) {
+                XFillRectangle(g_d, g_win, g_gc, px + col * s, py + row * s, s, s)
+            }
+        }
+    }
+}
+
+// Текст с выравниванием: right = 1 — правый край в x
+def draw_text(str s, int x, int y, int sc, int right) -> void {
+    int n = len(s)
+    int cw = 4 * sc
+    int px = x
+    if right == 1 {
+        px = x - (n * cw - sc)
+    }
+    for i in range(n) {
+        draw_glyph(char_code(s[i]), px, y, sc)
+        px += cw
+    }
+}
+
+def render() -> void {
+    // фон и дисплей
+    XSetForeground(g_d, g_gc, 0x1B1E23)
+    XFillRectangle(g_d, g_win, g_gc, 0, 0, WIN_W, WIN_H)
+    XSetForeground(g_d, g_gc, 0x101216)
+    XFillRectangle(g_d, g_win, g_gc, 0, 0, WIN_W, DISP_H)
+    // текст дисплея (справа, масштаб 6)
+    XSetForeground(g_d, g_gc, 0xE8EAED)
+    draw_text((str)disp, 310, 20, 6, 1)
+    // кнопки
+    for i in range(20) {
+        int col = i % 4
+        int row = i / 4
+        int bx = BTN_X + col * BTN_STEP_X
+        int by = BTN_Y + row * BTN_STEP_Y
+        int act = BTN[i]
+        int color = 0x2A2F37
+        if act == 14 {
+            color = 0x3D7DD8
+        } elif act == 16 {
+            color = 0x8C3A3A
+        } elif act >= 10 and act <= 13 {
+            color = 0x35445C
+        }
+        XSetForeground(g_d, g_gc, color)
+        XFillRectangle(g_d, g_win, g_gc, bx, by, BTN_W, BTN_H)
+        XSetForeground(g_d, g_gc, 0xE8EAED)
+        draw_glyph(act, bx + 34, by + 23, 3)
+    }
+    XFlush(g_d)
+}
+
+// ─────────────────────────────────────────────────────────────
+// Точка входа
+// ─────────────────────────────────────────────────────────────
+
+def main() -> void {
+    ptr/Display d = XOpenDisplay(0)
+    if d == 0 {
+        print("Lu Calc: не удалось открыть X11-дисплей")
+        return
+    }
+    int scr = DefaultScreen(d)
+    Window win = XCreateSimpleWindow(d, RootWindow(d, scr), 60, 60, WIN_W, WIN_H, 1, BlackPixel(d, scr), WhitePixel(d, scr))
+    GC gc = XCreateGC(d, win, 0, 0)
+    XStoreName(d, win, "Lu Calc")
+    XSelectInput(d, win, ExposureMask | ButtonPressMask | KeyPressMask | StructureNotifyMask)
+    Atom wm_del = XInternAtom(d, "WM_DELETE_WINDOW", False)
+    XSetWMProtocols(d, win, &wm_del, 1)
+    XMapWindow(d, win)
+
+    g_d = d
+    g_win = win
+    g_gc = gc
+    reset_all()
+
+    XEvent event
+    int running = 1
+    while running == 1 {
+        XNextEvent(d, &event)
+        if event.type == Expose {
+            render()
+        } elif event.type == ButtonPress {
+            int mx = event.xbutton.x
+            int my = event.xbutton.y
+            if mx >= BTN_X and mx < BTN_X + 4 * BTN_STEP_X - 2 and my >= BTN_Y and my < BTN_Y + 5 * BTN_STEP_Y - 2 {
+                int col = (mx - BTN_X) / BTN_STEP_X
+                int row = (my - BTN_Y) / BTN_STEP_Y
+                handle_action(BTN[row * 4 + col])
+                render()
+            }
+        } elif event.type == KeyPress {
+            // Shift выбирает вторую колонку keymap: Shift+= → plus, Shift+8 → asterisk
+            int kcol = 0
+            if event.xkey.state & 1 {
+                kcol = 1
+            }
+            long k = XLookupKeysym(&event.xkey, kcol)
+            handle_key(k)
+            render()
+        } elif event.type == ClientMessage {
+            if event.xclient.data.l[0] == (long)wm_del {
+                running = 0
+            }
+        }
+    }
+    XCloseDisplay(d)
+}

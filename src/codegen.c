@@ -25,6 +25,9 @@ static void iemit(Codegen *cg, const char *fmt, ...) {
    For other types, returns lu2c(t) followed by " name". */
 static void emit_c_decl(Codegen *cg, const char *t, const char *name);
 
+/* Vector<T> runtime emission (defined below emit_runtime) */
+static void emit_vector_runtime_for(Codegen *cg, const char *elem, const char *ct);
+
 /* Lu type → C type string */
 static const char *lu2c(const char *t) {
     if (!t) return "int";
@@ -153,7 +156,18 @@ static void emit_c_decl(Codegen *cg, const char *t, const char *name) {
 
 static bool node_is_class_like(ASTNode *n) {
     return n && (n->kind == NODE_CLASS_DECL || n->kind == NODE_INTERFACE_DECL ||
-                 n->kind == NODE_IMPL_DECL || n->kind == NODE_TEMPLATE_DECL);
+                 n->kind == NODE_IMPL_DECL || n->kind == NODE_TEMPLATE_DECL ||
+                 n->kind == NODE_STRUCT_DECL);
+}
+
+/* Structs accept methods (lowered like class methods), but only take the
+   class-like path when they actually declare one — plain structs keep
+   their simple anonymous-typedef emission. */
+static bool struct_has_methods(ASTNode *n) {
+    if (!n || n->kind != NODE_STRUCT_DECL) return false;
+    for (int i = 0; i < n->children.count; i++)
+        if (n->children.items[i]->kind == NODE_METHOD_DECL) return true;
+    return false;
 }
 
 static const char *class_field_c_type(ASTNode *cls, const char *t) {
@@ -606,13 +620,341 @@ static void emit_str_operand(Codegen *cg, ASTNode *n) {
 
 /* Determine the kind ("int", "float", "bool", "str", "auto") of an
    AST expression for f-string conversion. */
-static const char *expr_kind_from_ast(Codegen *cg, ASTNode *n) {
+/* v4.0: реестр пользовательских функций (см. lu.h) — регистрируются
+   в collect_functions, используются для проверки arity и точного
+   возвращаемого типа. */
+static ASTNode *cg_fn_find(Codegen *cg, const char *name) {
+    if (!cg || !name) return NULL;
+    for (int i = 0; i < cg->fn_node_count; i++)
+        if (!strcmp(cg->fn_names[i], name)) return cg->fn_nodes[i];
+    return NULL;
+}
+
+/* Количество параметров функции/метода/конструктора = число ведущих
+   NODE_VAR_DECL детей (дальше идёт тело NODE_PROGRAM). */
+static int cg_param_count(ASTNode *fn) {
+    int np = 0;
+    for (int i = 0; fn && i < fn->children.count; i++) {
+        if (fn->children.items[i]->kind == NODE_VAR_DECL) np++;
+        else break;
+    }
+    return np;
+}
+
+/* Проверка arity вызова: ошибка компиляции, если число аргументов
+   не совпадает с числом параметров. */
+static void cg_check_arity(Codegen *cg, const char *what, int line, ASTNode *fn, int argc) {
+    if (!fn || !what) return;
+    int np = cg_param_count(fn);
+    if (np != argc)
+        lu_error(line, "'%s' expects %d argument(s), got %d", what, np, argc);
+}
+
+/* Поиск конструктора: NODE_CONSTRUCTOR или метод "init" (с обходом
+   наследования). Возвращает узел функции конструктора или NULL. */
+static ASTNode *cg_class_find_ctor(Codegen *cg, ASTNode *cls) {
+    if (!cls) return NULL;
+    for (int i = 0; i < cls->children.count; i++) {
+        ASTNode *c = cls->children.items[i];
+        if (c->kind == NODE_CONSTRUCTOR) return c;
+    }
+    ASTNode *declared_in = cg_class_resolve_method(cg, cls, "init");
+    if (declared_in) {
+        for (int i = 0; i < declared_in->children.count; i++) {
+            ASTNode *m = declared_in->children.items[i];
+            if (m->kind == NODE_METHOD_DECL && m->sval && !strcmp(m->sval, "init"))
+                return m;
+        }
+    }
+    return NULL;
+}
+
+/* Тип поля класса по имени (с обходом наследования). NULL — поля нет.
+   *is_ptr устанавливается для массивных полей (массивы распадаются
+   на указатели). */
+static const char *cg_class_field_type(Codegen *cg, const char *cls_name,
+                                       const char *field, bool *is_ptr) {
+    ASTNode *cls = cg_class_find(cg, cls_name);
+    while (cls) {
+        for (int i = 0; i < cls->children.count; i++) {
+            ASTNode *c = cls->children.items[i];
+            if (c->kind == NODE_VAR_DECL && c->sval && !strcmp(c->sval, field)) {
+                if (is_ptr)
+                    *is_ptr = (c->op && !strcmp(c->op, "array")) || (int)c->ival > 0;
+                return c->type_name ? c->type_name : "auto";
+            }
+        }
+        /* walk to base class */
+        const char *base = NULL;
+        for (int i = 0; i < cls->children.count && !base; i++) {
+            ASTNode *c = cls->children.items[i];
+            if (c->kind == NODE_INHERIT && c->sval && c->sval[0]) {
+                base = c->sval;
+                const char *comma = strchr(base, ',');
+                if (comma) base = NULL; /* multiple inheritance not resolved */
+            }
+        }
+        cls = base ? cg_class_find(cg, base) : NULL;
+    }
+    return NULL;
+}
+
+/* ─────────────────────────────────────────────
+   v4.0: unified expression type inference.
+   Возвращает Lu-тип выражения ("int", "float", "str", "bool", "byte",
+   имя класса, "Vector<T>", ...) из таблицы символов и реестра классов —
+   без эвристик по именам полей. is_ptr=true для указательных выражений
+   (new T, Alloc, &x, chan). "auto" = не удалось определить.
+   ───────────────────────────────────────────── */
+static const char *lu_type_of(Codegen *cg, ASTNode *n, bool *is_ptr) {
+    if (is_ptr) *is_ptr = false;
     if (!n) return "auto";
     switch (n->kind) {
-    case NODE_LITERAL_INT:   return "int";
+    case NODE_LITERAL_INT:
+        if (n->sval && !strcmp(n->sval, "null")) {
+            if (is_ptr) *is_ptr = true;
+            return "void";
+        }
+        return "int";
     case NODE_LITERAL_FLOAT: return "float";
     case NODE_LITERAL_STR:   return "str";
     case NODE_LITERAL_BOOL:  return "bool";
+    case NODE_FSTRING:       return "str";
+
+    case NODE_IDENT: {
+        const char *name = n->sval ? n->sval : "";
+        char base[128];
+        const char *rest = NULL;
+        const char *dot = strchr(name, '.');
+        if (dot && dot != name && dot[1]) {
+            size_t bl = (size_t)(dot - name);
+            if (bl >= sizeof(base)) bl = sizeof(base) - 1;
+            memcpy(base, name, bl); base[bl] = '\0';
+            rest = dot + 1;
+        } else {
+            snprintf(base, sizeof(base), "%s", name);
+        }
+        Symbol *s = cg_sym_find(cg, base);
+        if (!s) return "auto";
+        const char *ty = s->type;
+        bool ip = s->is_ptr;
+        while (rest) {
+            if (!strcmp(ty, "chan")) return "int";
+            const char *next = strchr(rest, '.');
+            char field[128];
+            size_t fl = next ? (size_t)(next - rest) : strlen(rest);
+            if (fl >= sizeof(field)) fl = sizeof(field) - 1;
+            memcpy(field, rest, fl); field[fl] = '\0';
+            bool fip = false;
+            const char *fty = cg_class_field_type(cg, ty, field, &fip);
+            if (!fty) return "auto";
+            ty = fty;
+            ip = fip;
+            rest = next ? next + 1 : NULL;
+        }
+        if (!strcmp(ty, "chan")) return "int";
+        if (is_ptr) *is_ptr = ip;
+        return ty;
+    }
+
+    case NODE_EXPR_FIELD: {
+        bool bip = false;
+        const char *bty = lu_type_of(cg, n->children.count > 0 ? n->children.items[0] : NULL, &bip);
+        if (!bty || !strcmp(bty, "auto") || !strcmp(bty, "chan")) return "auto";
+        const char *fty = cg_class_field_type(cg, bty, n->sval ? n->sval : "", is_ptr);
+        return fty ? fty : "auto";
+    }
+
+    case NODE_EXPR_BINOP: {
+        const char *op = n->op ? n->op : "";
+        if (!strcmp(op, "==") || !strcmp(op, "!=") || !strcmp(op, "<") ||
+            !strcmp(op, ">") || !strcmp(op, "<=") || !strcmp(op, ">=") ||
+            !strcmp(op, "&&") || !strcmp(op, "||") || !strcmp(op, "in"))
+            return "bool";
+        if (!strcmp(op, "**")) return "float";
+        ASTNode *l = n->children.count > 0 ? n->children.items[0] : NULL;
+        ASTNode *r = n->children.count > 1 ? n->children.items[1] : NULL;
+        bool lip = false, rip = false;
+        const char *lt = lu_type_of(cg, l, &lip);
+        const char *rt = lu_type_of(cg, r, &rip);
+        if (!strcmp(op, "+") && (!strcmp(lt, "str") || !strcmp(rt, "str")))
+            return "str";
+        /* перегрузка оператора в классе: a + b, где a/b — экземпляры класса */
+        if (!strcmp(op, "+") || !strcmp(op, "-") || !strcmp(op, "*") ||
+            !strcmp(op, "/") || !strcmp(op, "==") || !strcmp(op, "!=")) {
+            const char *cands[2] = { lt, rt };
+            for (int i = 0; i < 2; i++) {
+                ASTNode *cls = cg_class_find(cg, cands[i]);
+                if (!cls) continue;
+                for (int j = 0; j < cls->children.count; j++) {
+                    ASTNode *m = cls->children.items[j];
+                    if (m->kind == NODE_OP_OVERLOAD && m->op && !strcmp(m->op, op))
+                        return m->type_name ? m->type_name : "auto";
+                }
+            }
+        }
+        if (!strcmp(lt, "float") || !strcmp(rt, "float")) return "float";
+        if (!strcmp(lt, "auto") && !strcmp(rt, "auto")) return "auto";
+        return "int";
+    }
+
+    case NODE_EXPR_UNOP: {
+        const char *op = n->op ? n->op : "";
+        if (!strcmp(op, "sizeof")) return "int";
+        if (!strcmp(op, "!")) return "bool";
+        return lu_type_of(cg, n->children.count > 0 ? n->children.items[0] : NULL, is_ptr);
+    }
+
+    case NODE_EXPR_DEREF: {
+        bool cip = false;
+        const char *ct = lu_type_of(cg, n->children.count > 0 ? n->children.items[0] : NULL, &cip);
+        if (cip) return ct;   /* *p, где p: T* → T */
+        return "auto";
+    }
+
+    case NODE_EXPR_REF: {
+        bool cip = false;
+        const char *ct = lu_type_of(cg, n->children.count > 0 ? n->children.items[0] : NULL, &cip);
+        if (strcmp(ct, "auto")) {
+            if (is_ptr) *is_ptr = true;
+            return ct;
+        }
+        return "auto";
+    }
+
+    case NODE_EXPR_INDEX: {
+        if (n->op && (!strcmp(n->op, "list") || !strcmp(n->op, "slice")))
+            return "auto";
+        bool bip = false;
+        const char *bty = lu_type_of(cg, n->children.count > 0 ? n->children.items[0] : NULL, &bip);
+        if (!strcmp(bty, "str")) return "int";   /* s[i] → char */
+        if (!strncmp(bty, "Vector<", 7)) {
+            const char *inner = bty + 7;
+            const char *end = strchr(inner, '>');
+            if (end) {
+                static char elem[32];
+                size_t elen = (size_t)(end - inner);
+                if (elen < sizeof(elem)) {
+                    memcpy(elem, inner, elen); elem[elen] = '\0';
+                    return elem;
+                }
+            }
+        }
+        /* массивы: тип в таблице символов уже элементный */
+        return strcmp(bty, "auto") ? bty : "auto";
+    }
+
+    case NODE_EXPR_TERNARY:
+        return lu_type_of(cg, n->children.count > 1 ? n->children.items[1] : NULL, is_ptr);
+
+    case NODE_NEW_EXPR: {
+        if (is_ptr) *is_ptr = true;
+        return n->sval ? n->sval : "auto";
+    }
+
+    case NODE_ALLOC: {
+        if (is_ptr) *is_ptr = true;
+        return n->type_name ? n->type_name : "auto";
+    }
+
+    case NODE_CHAN_RECV: return "int";
+
+    case NODE_FUNC_CALL: {
+        if (n->sval && strchr(n->sval, '.')) {
+            const char *dot = strchr(n->sval, '.');
+            char obj[128];
+            size_t obj_len = (size_t)(dot - n->sval);
+            if (obj_len >= sizeof(obj)) obj_len = sizeof(obj) - 1;
+            memcpy(obj, n->sval, obj_len);
+            obj[obj_len] = '\0';
+            Symbol *os = cg_sym_find(cg, obj);
+            if (os) {
+                /* Vector<T>-методы */
+                if (!strncmp(os->type, "Vector<", 7)) {
+                    if (!strcmp(dot + 1, "len") || !strcmp(dot + 1, "push") ||
+                        !strcmp(dot + 1, "set") || !strcmp(dot + 1, "free"))
+                        return !strcmp(dot + 1, "len") ? "int" : "void";
+                    if (!strcmp(dot + 1, "get") || !strcmp(dot + 1, "pop")) {
+                        const char *inner = os->type + 7;
+                        const char *end = strchr(inner, '>');
+                        size_t elen = end ? (size_t)(end - inner) : 0;
+                        if (elen) {
+                            static char elem[32];
+                            if (elen < sizeof(elem)) {
+                                memcpy(elem, inner, elen); elem[elen] = '\0';
+                                return elem;
+                            }
+                        }
+                        return "int";
+                    }
+                }
+                /* метод класса — точный тип из реестра классов */
+                ASTNode *declared_in = cg_class_resolve_method(cg, cg_class_find(cg, os->type),
+                                                               dot + 1);
+                if (declared_in) {
+                    for (int i = 0; i < declared_in->children.count; i++) {
+                        ASTNode *m = declared_in->children.items[i];
+                        if (m->kind == NODE_METHOD_DECL && m->sval && !strcmp(m->sval, dot + 1))
+                            return m->type_name ? m->type_name : "void";
+                    }
+                }
+                return "auto";
+            }
+            return "auto";
+        }
+        /* встроенные с известным возвращаемым типом */
+        if (!strcmp(n->sval, "len") || !strcmp(n->sval, "min") ||
+            !strcmp(n->sval, "max") || !strcmp(n->sval, "abs"))
+            return "int";
+        if (!strcmp(n->sval, "sqrt") || !strcmp(n->sval, "floor") ||
+            !strcmp(n->sval, "ceil") || !strcmp(n->sval, "round") ||
+            !strcmp(n->sval, "pow") || !strcmp(n->sval, "sin") ||
+            !strcmp(n->sval, "cos") || !strcmp(n->sval, "tan"))
+            return "float";
+        if (!strcmp(n->sval, "upper") || !strcmp(n->sval, "lower") ||
+            !strcmp(n->sval, "replace") || !strcmp(n->sval, "read_file") ||
+            !strcmp(n->sval, "input"))
+            return "str";
+        if (!strcmp(n->sval, "contains"))
+            return "bool";
+        if (n->sval[0] == 't' && !strncmp(n->sval, "tensor_", 7)) {
+            if (!strcmp(n->sval, "tensor_rows") || !strcmp(n->sval, "tensor_cols"))
+                return "int";
+            if (!strcmp(n->sval, "tensor_sum") || !strcmp(n->sval, "tensor_mean") ||
+                !strcmp(n->sval, "tensor_get"))
+                return "float";
+            return "Tensor";
+        }
+        /* вызов переменной функционального типа: fn:int,int->int */
+        Symbol *s = cg_sym_find(cg, n->sval);
+        if (s && !strncmp(s->type, "fn:", 3)) {
+            const char *arrow = strstr(s->type, "->");
+            if (arrow) {
+                static char fret[64];
+                snprintf(fret, sizeof(fret), "%s", arrow + 2);
+                return fret;
+            }
+        }
+        /* пользовательская функция — точный тип из реестра */
+        ASTNode *fn = cg_fn_find(cg, n->sval);
+        if (fn) {
+            cg_check_arity(cg, n->sval, n->line, fn, n->children.count);
+            return fn->type_name ? fn->type_name : "void";
+        }
+        return "auto";
+    }
+
+    default: return "auto";
+    }
+}
+
+static const char *expr_kind_from_ast(Codegen *cg, ASTNode *n);
+
+/* Legacy name-based heuristics — fallback for expressions the unified
+   inference can't resolve (weird dotted idents on non-class bases etc.). */
+static const char *expr_kind_legacy(Codegen *cg, ASTNode *n) {
+    if (!n) return "auto";
+    switch (n->kind) {
     case NODE_IDENT: {
         /* Handle dotted identifiers like "p.x" that the lexer produces
            as a single token. We look up the base variable and apply
@@ -704,11 +1046,23 @@ static const char *expr_kind_from_ast(Codegen *cg, ASTNode *n) {
                         if (!strcmp(ms->type, "float")) return "float";
                         if (!strcmp(ms->type, "bool")) return "bool";
                     }
-                    /* Vector<T>.len() / .get() / .pop() return int */
+                    /* Vector<T>.len() → int; get()/pop() → по типу элемента */
                     if (!strncmp(os->type, "Vector<", 7)) {
-                        if (!strcmp(dot + 1, "len") || !strcmp(dot + 1, "get") ||
-                            !strcmp(dot + 1, "pop"))
+                        if (!strcmp(dot + 1, "len"))
                             return "int";
+                        if (!strcmp(dot + 1, "get") || !strcmp(dot + 1, "pop")) {
+                            const char *inner = os->type + 7;
+                            const char *end = strchr(inner, '>');
+                            size_t elen = end ? (size_t)(end - inner) : 0;
+                            if (elen &&
+                                (!strncmp(inner, "str", elen) || !strncmp(inner, "id", elen)))
+                                return "str";
+                            if (elen && !strncmp(inner, "float", elen))
+                                return "float";
+                            if (elen && !strncmp(inner, "bool", elen))
+                                return "bool";
+                            return "int";
+                        }
                     }
                     /* "init" / "speak" / "name" etc. heuristics for inherited */
                     if (!strcmp(dot + 1, "init")) return "void";
@@ -833,6 +1187,21 @@ static const char *expr_kind_from_ast(Codegen *cg, ASTNode *n) {
     }
 }
 
+/* v4.0: unified entry point. Tries registry-based lu_type_of first;
+   falls back to legacy name heuristics when the type is unresolved.
+   Old heuristic paths keep working, new ones are exact. */
+static const char *expr_kind_from_ast(Codegen *cg, ASTNode *n) {
+    bool ip = false;
+    const char *t = lu_type_of(cg, n, &ip);
+    if (!strcmp(t, "int") || !strcmp(t, "int64") || !strcmp(t, "byte") ||
+        !strcmp(t, "chan"))
+        return "int";
+    if (!strcmp(t, "float")) return "float";
+    if (!strcmp(t, "str") || !strcmp(t, "id")) return "str";
+    if (!strcmp(t, "bool")) return "bool";
+    return expr_kind_legacy(cg, n);
+}
+
 /* Emit a value as a string for f-string concatenation, wrapping it
    with the appropriate conversion helper based on its inferred type. */
 static void emit_fstring_expr(Codegen *cg, ASTNode *n) {
@@ -852,6 +1221,38 @@ static void emit_fstring_expr(Codegen *cg, ASTNode *n) {
     } else {
         /* str or auto: emit as-is (assume char*) */
         gen_expr(cg, n);
+    }
+}
+
+/* v4.0: один аргумент print без перевода строки — тип берётся из
+   единого вывода (lu_type_of). lu_print не годится: он добавляет '\n'. */
+static void emit_print_arg(Codegen *cg, ASTNode *e) {
+    const char *kind = expr_kind_from_ast(cg, e);
+    if (!strcmp(kind, "int")) {
+        iemit(cg, "printf(\"%%lld\", (long long)(");
+        gen_expr(cg, e);
+        emit(cg, "));\n");
+    } else if (!strcmp(kind, "float")) {
+        iemit(cg, "printf(\"%%g\", (double)(");
+        gen_expr(cg, e);
+        emit(cg, "));\n");
+    } else if (!strcmp(kind, "bool")) {
+        iemit(cg, "printf(\"%%s\", (");
+        gen_expr(cg, e);
+        emit(cg, ") ? \"true\" : \"false\");\n");
+    } else {
+        /* str — печатаем как char*, как в f-строках; auto — безопасный
+           lu_print: _Generic выберет функцию по фактическому C-типу
+           (printf("%s", long) — segfault). */
+        if (!strcmp(kind, "str")) {
+            iemit(cg, "printf(\"%%s\", ");
+            gen_expr(cg, e);
+            emit(cg, ");\n");
+        } else {
+            iemit(cg, "lu_print(");
+            gen_expr(cg, e);
+            emit(cg, ");\n");
+        }
     }
 }
 
@@ -899,6 +1300,24 @@ static void emit_fstring_node(Codegen *cg, ASTNode *n) {
 }
 
 /* Infer the C type of an expression for `auto` declarations. */
+static const char *infer_c_type(Codegen *cg, ASTNode *n);
+
+/* Nested-brace-aware initializer element: {{1,2},{3,4}} needs real
+   braces in C aggregate initializers — compound literals are rejected
+   there ("non-constant array expression"). */
+static void gen_array_init_elem(Codegen *cg, ASTNode *e) {
+    if (e && e->kind == NODE_EXPR_INDEX && e->op && !strcmp(e->op, "list")) {
+        emit(cg, "{");
+        for (int i = 0; i < e->children.count; i++) {
+            if (i) emit(cg, ", ");
+            gen_array_init_elem(cg, e->children.items[i]);
+        }
+        emit(cg, "}");
+        return;
+    }
+    gen_expr(cg, e);
+}
+
 static const char *infer_c_type(Codegen *cg, ASTNode *n) {
     if (!n) return "int";
     switch (n->kind) {
@@ -930,12 +1349,22 @@ static const char *infer_c_type(Codegen *cg, ASTNode *n) {
         if (!strcmp(lt, "double") || !strcmp(rt, "double")) return "double";
         return lt;
     }
-    case NODE_NEW_EXPR:
-        /* new Type() → Type* */
-        return n->sval ? n->sval : "void*";
+    case NODE_NEW_EXPR: {
+        /* new Type() → Type* (v4.0: через единый вывод типов) */
+        bool ip = false;
+        const char *lt = lu_type_of(cg, n, &ip);
+        static char nb[128];
+        snprintf(nb, sizeof(nb), "%s%s", lu2c(lt), ip ? "*" : "");
+        return nb;
+    }
     case NODE_FUNC_CALL: {
         Symbol *s = cg_sym_find(cg, n->sval);
         if (s) return lu2c(s->type);
+        ASTNode *fn = cg_fn_find(cg, n->sval);
+        if (fn) {
+            cg_check_arity(cg, n->sval, n->line, fn, n->children.count);
+            return lu2c(fn->type_name ? fn->type_name : "void");
+        }
         return "int";
     }
     case NODE_EXPR_INDEX:
@@ -944,8 +1373,18 @@ static const char *infer_c_type(Codegen *cg, ASTNode *n) {
         /* slice arr[a:b] → lu_slice_t */
         if (n->op && !strcmp(n->op, "slice")) return "lu_slice_t";
         return "int";
-    default:
+    default: {
+        /* v4.0: всё остальное — через единый вывод типов
+           (поля, методы, перегрузки операторов, тернарник, unop) */
+        bool ip = false;
+        const char *lt = lu_type_of(cg, n, &ip);
+        if (strcmp(lt, "auto") && strcmp(lt, "void")) {
+            static char db[128];
+            snprintf(db, sizeof(db), "%s%s", lu2c(lt), ip ? "*" : "");
+            return db;
+        }
         return "int";
+    }
     }
 }
 
@@ -994,6 +1433,11 @@ static void gen_expr(Codegen *cg, ASTNode *n) {
     }
     case NODE_IDENT:
         emit_c_ident(cg, n->sval ? n->sval : "_unknown");
+        break;
+    case NODE_CHAN_RECV:
+        /* Recv/ch as an expression: values travel as (void*)(intptr_t),
+           so cast back to an integer the same way. */
+        emit(cg, "((intptr_t)lu_chan_recv(%s))", n->sval ? n->sval : "_ch");
         break;
     case NODE_EXPR_BINOP:
         /* a in b → lu_str_contains(b, a): проверка подстроки (Python-стиль) */
@@ -1104,6 +1548,17 @@ static void gen_expr(Codegen *cg, ASTNode *n) {
         break;
     case NODE_EXPR_UNOP: {
         const char *op = n->op ? n->op : "!";
+        /* sizeof(type) / sizeof(expr) — v4.0 */
+        if (!strcmp(op, "sizeof")) {
+            if (n->type_name) {
+                emit(cg, "sizeof(%s)", lu2c(n->type_name));
+            } else {
+                emit(cg, "sizeof(");
+                gen_expr(cg, n->children.count > 0 ? n->children.items[0] : NULL);
+                emit(cg, ")");
+            }
+            break;
+        }
         /* Type cast: op = "(cast:type)" → emit ((type)(expr)) */
         if (!strncmp(op, "(cast:", 6)) {
             const char *tname = op + 6;
@@ -1248,6 +1703,16 @@ static void gen_expr(Codegen *cg, ASTNode *n) {
                     emit_class = declared_in->sval;
                     need_base_cast = true;
                 }
+                /* v4.0: arity check for class methods */
+                if (declared_in) {
+                    for (int i = 0; i < declared_in->children.count; i++) {
+                        ASTNode *m = declared_in->children.items[i];
+                        if (m->kind == NODE_METHOD_DECL && m->sval && !strcmp(m->sval, method)) {
+                            cg_check_arity(cg, n->sval, n->line, m, n->children.count);
+                            break;
+                        }
+                    }
+                }
             }
 
             /* For Vector<T> types, the C type is lu_vector_<T>, and methods
@@ -1279,6 +1744,10 @@ static void gen_expr(Codegen *cg, ASTNode *n) {
             }
             emit(cg, ")");
         } else {
+            /* v4.0: arity check for plain user-function calls (builtins are
+               not in the fn registry, so cg_fn_find returns NULL for them) */
+            ASTNode *fn = cg_fn_find(cg, name);
+            if (fn) cg_check_arity(cg, name, n->line, fn, n->children.count);
             /* Remap built-in function names to their C runtime equivalents. */
             const char *emit_name = name;
             if (!strcmp(name, "min")) emit_name = "lu_min";
@@ -1314,7 +1783,25 @@ static void gen_expr(Codegen *cg, ASTNode *n) {
         break;
     case NODE_NEW_EXPR:
         /* new Type() — allocate. new Type(args) — allocate + init for primitives.
-           Use lu2c() to translate Lu type names to C (str→char*, float→double, etc.). */
+           Use lu2c() to translate Lu type names to C (str→char*, float→double, etc.).
+           v4.0: для классов/структур — calloc + конструктор (CTOR или метод init):
+           new Vec2(1,2) → ({ Vec2 *_t = calloc(1, sizeof(Vec2)); Vec2_init(_t, 1, 2); _t; }) */
+        if (cg_class_find(cg, n->sval ? n->sval : "")) {
+            const char *ty = n->sval;
+            ASTNode *ctor = cg_class_find_ctor(cg, cg_class_find(cg, ty));
+            cg_check_arity(cg, ty, n->line, ctor, n->children.count);
+            emit(cg, "({ %s *_t = calloc(1, sizeof(%s)); ", ty, ty);
+            if (ctor) {
+                emit(cg, "%s_init(_t", ty);
+                for (int i = 0; i < n->children.count; i++) {
+                    emit(cg, ", ");
+                    gen_expr(cg, n->children.items[i]);
+                }
+                emit(cg, ")");
+            }
+            emit(cg, "; _t; })");
+            break;
+        }
         if (n->children.count > 0) {
             const char *c_type = lu2c(n->sval);
             emit(cg, "({ %s *_t = (%s*)malloc(sizeof(%s)); *_t = (", c_type, c_type, c_type);
@@ -1580,6 +2067,7 @@ static bool top_level_skip_after_preamble(ASTNode *n) {
     case NODE_STRUCT_DECL: case NODE_UNION_DECL: case NODE_ENUM_DECL:
     case NODE_FUNC_DECL: case NODE_ASYNC_FUNC:
     case NODE_VAR_DECL:  /* emitted as globals in pre-pass */
+    case NODE_PTR_DECL:  /* emitted as globals in pre-pass (v4.0) */
         return true;
     default:
         return node_is_class_like(n);
@@ -1613,6 +2101,7 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
                Если в программе есть asm-блок — глобали volatile:
                оптимизатор не видит записей из __asm__ и вычищает их. */
             const char *gqual = cg->has_asm ? "static volatile " : "static ";
+            if (n->annot && !strcmp(n->annot, "const")) gqual = "static const ";
             if (t && !strncmp(t, "fn:", 3)) {
                 emit(cg, "%s", gqual);
                 emit_c_decl(cg, t, n->sval ? n->sval : "_g");
@@ -1630,7 +2119,7 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
                     emit(cg, " = {");
                     for (int j = gndims; j < n->children.count; j++) {
                         if (j > gndims) emit(cg, ", ");
-                        gen_expr(cg, n->children.items[j]);
+                        gen_array_init_elem(cg, n->children.items[j]);
                     }
                     emit(cg, "}");
                 }
@@ -1640,13 +2129,29 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
             }
             emit(cg, ";\n");
             cg_sym_add(cg, n->sval ? n->sval : "_g", n->type_name, false);
+        } else if (n->kind == NODE_PTR_DECL) {
+            /* ptr/T name = expr at file scope — must precede functions that
+               use it, so emit it in the globals pre-pass (v4.0 fix). */
+            const char *t = lu2c(n->type_name);
+            const char *pqual = cg->has_asm ? "static volatile " : "static ";
+            emit(cg, "%s%s *%s", pqual, t, n->sval ? n->sval : "_g");
+            if (n->children.count > 0) {
+                emit(cg, " = ");
+                gen_expr(cg, n->children.items[0]);
+            }
+            emit(cg, ";\n");
+            cg_sym_add(cg, n->sval ? n->sval : "_g", n->type_name, true);
         }
     }
 
     /* Types before prototypes and blocks. */
     for (int i = 0; root && i < root->children.count; i++) {
         ASTNode *n = root->children.items[i];
-        if (n->kind == NODE_STRUCT_DECL || n->kind == NODE_UNION_DECL || n->kind == NODE_ENUM_DECL)
+        if (n->kind == NODE_UNION_DECL || n->kind == NODE_ENUM_DECL)
+            gen_node(cg, n);
+        else if (struct_has_methods(n))
+            gen_class_struct_decl(cg, n);
+        else if (n->kind == NODE_STRUCT_DECL)
             gen_node(cg, n);
         else if (node_is_class_like(n))
             gen_class_struct_decl(cg, n);
@@ -1661,7 +2166,8 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
             if (!strcmp(fname, "main")) { fname = "lu_user_main"; cg->has_user_main = true; }
             emit_function_signature(cg, n, fname, NULL);
             emit(cg, ";\n");
-        } else if (node_is_class_like(n)) {
+        } else if (node_is_class_like(n) &&
+                   (n->kind != NODE_STRUCT_DECL || struct_has_methods(n))) {
             gen_class_method_prototypes(cg, n);
         } else if (n->kind == NODE_BLOCK) {
             emit(cg, "void _q%d(void);\n", n->block_n);
@@ -1677,7 +2183,8 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
             if (!strcmp(fname, "main")) { fname = "lu_user_main"; cg->has_user_main = true; }
             gen_function_definition_named(cg, n, fname, NULL);
         }
-        else if (node_is_class_like(n))
+        else if (node_is_class_like(n) &&
+                 (n->kind != NODE_STRUCT_DECL || struct_has_methods(n)))
             gen_class_method_definitions(cg, n);
     }
 
@@ -1759,30 +2266,66 @@ static void gen_node(Codegen *cg, ASTNode *n) {
     /* ── Variable declaration ── */
     case NODE_VAR_DECL: {
         /* auto type inference: auto x = expr → infer type from expr.
-           We need the Lu type for the symbol table (so expr_kind_from_ast
-           can look it up). infer_c_type returns C types, so we map back. */
+           v4.0: единый вывод lu_type_of даёт Lu-тип + признак указателя
+           (auto d = new Vec2(...) → d: Vec2*); старый back-map из C-типов
+           остаётся фолбэком для особых случаев (лямбды, срезы). */
         const char *inferred_type = n->type_name;
+        bool var_is_ptr = false;
         if (n->type_name && !strcmp(n->type_name, "auto")) {
             if (n->children.count > 0) {
                 ASTNode *init = n->children.items[0];
-                const char *c_t = infer_c_type(cg, init);
-                /* Map C type back to Lu type for the symbol table. */
-                if (!strcmp(c_t, "double")) inferred_type = "float";
-                else if (!strcmp(c_t, "char*")) inferred_type = "str";
-                else if (!strcmp(c_t, "bool")) inferred_type = "bool";
-                else if (!strncmp(c_t, "lu_slice_t", 10)) inferred_type = "lu_slice_t";
-                else inferred_type = "int";
+                bool ip = false;
+                const char *lt = lu_type_of(cg, init, &ip);
+                if (strcmp(lt, "auto") && strcmp(lt, "void")) {
+                    inferred_type = lt;
+                    var_is_ptr = ip;
+                } else {
+                    const char *c_t = infer_c_type(cg, init);
+                    /* Map C type back to Lu type for the symbol table. */
+                    if (!strcmp(c_t, "double")) inferred_type = "float";
+                    else if (!strcmp(c_t, "char*")) inferred_type = "str";
+                    else if (!strcmp(c_t, "bool")) inferred_type = "bool";
+                    else if (!strncmp(c_t, "lu_slice_t", 10)) inferred_type = "lu_slice_t";
+                    else inferred_type = "int";
+                }
             } else {
                 inferred_type = "int";
             }
         }
-        cg_sym_add(cg, n->sval ? n->sval : "_var", inferred_type, false);
+        cg_sym_add(cg, n->sval ? n->sval : "_var", inferred_type, var_is_ptr);
+        /* C++-style value construction: Vec2 a = new Vec2(1, 2) →
+           Vec2 a; Vec2_init(&a, 1, 2); — нельзя присвоить указатель значению. */
+        ASTNode *init0 = (n->children.count == 1) ? n->children.items[0] : NULL;
+        if (init0 && init0->kind == NODE_NEW_EXPR && !var_is_ptr &&
+            n->type_name && strcmp(n->type_name, "auto") &&
+            cg_class_find(cg, n->type_name)) {
+            ASTNode *ctor = cg_class_find_ctor(cg, cg_class_find(cg, n->type_name));
+            cg_check_arity(cg, n->type_name, n->line, ctor, init0->children.count);
+            const char *qual = (n->annot && !strcmp(n->annot, "const")) ? "const " : "";
+            indent(cg);
+            emit(cg, "%s%s %s;\n", qual, n->type_name, n->sval ? n->sval : "_var");
+            if (ctor) {
+                indent(cg);
+                emit(cg, "%s_init(&%s", n->type_name, n->sval ? n->sval : "_var");
+                for (int i = 0; i < init0->children.count; i++) {
+                    emit(cg, ", ");
+                    gen_expr(cg, init0->children.items[i]);
+                }
+                emit(cg, ");\n");
+            }
+            return;
+        }
         /* Use emit_c_decl so function pointer types put the name inside
            the parens. For auto, use the Lu type (so fn:... works);
            for explicit types, use lu2c of the original type_name. */
         indent(cg);
+        const char *qual = (n->annot && !strcmp(n->annot, "const")) ? "const " : "";
+        emit(cg, "%s", qual);
         if (n->type_name && !strcmp(n->type_name, "auto")) {
-            emit_c_decl(cg, inferred_type, n->sval ? n->sval : "_var");
+            if (var_is_ptr)
+                emit(cg, "%s *%s", lu2c(inferred_type), n->sval ? n->sval : "_var");
+            else
+                emit_c_decl(cg, inferred_type, n->sval ? n->sval : "_var");
         } else {
             emit_c_decl(cg, n->type_name, n->sval ? n->sval : "_var");
         }
@@ -1811,7 +2354,7 @@ static void gen_node(Codegen *cg, ASTNode *n) {
                 emit(cg, " = {");
                 for (int i = ndims; i < n->children.count; i++) {
                     if (i > ndims) emit(cg, ", ");
-                    gen_expr(cg, n->children.items[i]);
+                    gen_array_init_elem(cg, n->children.items[i]);
                 }
                 emit(cg, "}");
             }
@@ -2052,6 +2595,16 @@ static void gen_node(Codegen *cg, ASTNode *n) {
     /* Pr/ → printf ── */
     case NODE_PR: {
         if (n->children.count == 0) { iemit(cg, "printf(\"\\n\");\n"); return; }
+        /* Python-style multi-arg: print(a, b, c) → values separated by
+           spaces, one trailing newline. */
+        if (n->children.count > 1) {
+            for (int i = 0; i < n->children.count; i++) {
+                if (i) iemit(cg, "printf(\" \");\n");
+                emit_print_arg(cg, n->children.items[i]);
+            }
+            iemit(cg, "printf(\"\\n\");\n");
+            return;
+        }
         ASTNode *e = n->children.items[0];
         /* f-string via NODE_FSTRING (v2) */
         if (e->kind == NODE_FSTRING) {
@@ -2313,6 +2866,7 @@ static void gen_node(Codegen *cg, ASTNode *n) {
         cg->indent++;
         for (int i = 0; i < n->children.count; i++) {
             ASTNode *f = n->children.items[i];
+            if (f->kind != NODE_VAR_DECL) continue; /* methods handled elsewhere */
             int fndims = (int)f->ival;
             bool is_array = (f->op && !strcmp(f->op, "array")) || fndims > 0;
             if (is_array && fndims > 0) {
@@ -2421,7 +2975,11 @@ static void gen_node(Codegen *cg, ASTNode *n) {
         emit(cg, "));\n");
         return;
     case NODE_CHAN_RECV:
-        iemit(cg, "lu_chan_recv(%s);\n", n->sval ? n->sval : "_ch");
+        /* statement form: receive and discard; as an expression the value
+           is emitted by gen_expr (see NODE_CHAN_RECV there) */
+        iemit(cg, "");
+        gen_expr(cg, n);
+        emit(cg, ";\n");
         return;
 
     /* ── Events ── */
@@ -2918,33 +3476,14 @@ static void emit_runtime(Codegen *cg) {
 "#define write_file(p,c) lu_write_file(p,c)\n"
 "#define input(p) lu_input(p)\n"
 "\n"
-"/* ── Vector<T> built-in (int version) ── */\n"
-"typedef struct { int *data; int len; int cap; } lu_vector_int;\n"
-"static void lu_vector_int_init(lu_vector_int *v) { v->data = NULL; v->len = 0; v->cap = 0; }\n"
-"static void lu_vector_int_push(lu_vector_int *v, int val) {\n"
-"    if (v->len >= v->cap) {\n"
-"        v->cap = v->cap ? v->cap * 2 : 8;\n"
-"        v->data = (int*)realloc(v->data, sizeof(int) * v->cap);\n"
-"        if (!v->data) { exit(ERR_MEM); }\n"
-"    }\n"
-"    v->data[v->len++] = val;\n"
-"}\n"
-"static int lu_vector_int_get(lu_vector_int *v, int i) {\n"
-"    if (i < 0 || i >= v->len) return 0;\n"
-"    return v->data[i];\n"
-"}\n"
-"static void lu_vector_int_set(lu_vector_int *v, int i, int val) {\n"
-"    if (i >= 0 && i < v->len) v->data[i] = val;\n"
-"}\n"
-"static int lu_vector_int_len(lu_vector_int *v) { return v->len; }\n"
-"static int lu_vector_int_pop(lu_vector_int *v) {\n"
-"    if (v->len == 0) return 0;\n"
-"    return v->data[--v->len];\n"
-"}\n"
-"static void lu_vector_int_free(lu_vector_int *v) {\n"
-"    if (v->data) { free(v->data); v->data = NULL; v->len = 0; v->cap = 0; }\n"
-"}\n"
-"\n"
+, cg->out);
+
+/* Vector<T> built-in — по одному экземпляру на каждый реально
+   использованный тип элемента (см. cg_collect_vector_elems). */
+for (int i = 0; i < cg->vector_elem_count; i++)
+    emit_vector_runtime_for(cg, cg->vector_elems[i], lu2c(cg->vector_elems[i]));
+
+fputs(
 "/* ── Smart pointers: Unique<T> and Shared<T> ── */\n"
 "/* Unique<T> is a pointer that is automatically freed when it goes out of scope.\n"
 "   Usage: Unique<int> p = new int(42)\n"
@@ -3199,6 +3738,77 @@ static bool ast_uses_tensor(ASTNode *n) {
     return false;
 }
 
+/* ── Vector<T>: сбор типов элементов и мономорфный рантайм ──
+   Тип Vector<str> в C превращается в lu_vector_str, но исторически
+   рантайм определял только int-версию — любой другой элемент давал
+   невалидный C. Теперь для каждого реально использованного T эмитится
+   своя версия (структура + init/push/get/set/len/pop/free). */
+
+/* Collect the Lu element types of every Vector<T> declared anywhere.
+   Only identifier-shaped elements are collected (int, str, user classes…);
+   nested/pointer elements never had a working lowering and stay unsupported. */
+static void cg_collect_vector_elems(Codegen *cg, ASTNode *n) {
+    if (!n) return;
+    if (n->type_name && !strncmp(n->type_name, "Vector<", 7)) {
+        const char *inner = n->type_name + 7;
+        const char *end = strchr(inner, '>');
+        size_t len = end ? (size_t)(end - inner) : 0;
+        bool ident_only = len > 0 && len < 32;
+        for (size_t k = 0; ident_only && k < len; k++)
+            if (!isalnum((unsigned char)inner[k]) && inner[k] != '_')
+                ident_only = false;
+        if (ident_only) {
+            char elem[32];
+            memcpy(elem, inner, len);
+            elem[len] = '\0';
+            bool seen = false;
+            for (int i = 0; i < cg->vector_elem_count; i++)
+                if (!strcmp(cg->vector_elems[i], elem)) { seen = true; break; }
+            if (!seen && cg->vector_elem_count < 16) {
+                snprintf(cg->vector_elems[cg->vector_elem_count], 32, "%s", elem);
+                cg->vector_elem_count++;
+            }
+        }
+    }
+    for (int i = 0; i < n->children.count; i++)
+        cg_collect_vector_elems(cg, n->children.items[i]);
+}
+
+/* Emit the lu_vector_<T> struct + method set for one element type.
+   `elem` is the Lu type name (int/str/float/...), `ct` its C type. */
+static void emit_vector_runtime_for(Codegen *cg, const char *elem, const char *ct) {
+    char name[64];
+    snprintf(name, sizeof(name), "lu_vector_%s", elem);
+
+    emit(cg, "/* ── Vector<%s> built-in ── */\n", elem);
+    emit(cg, "typedef struct { %s *data; int len; int cap; } %s;\n", ct, name);
+    emit(cg, "static void %s_init(%s *v) { v->data = NULL; v->len = 0; v->cap = 0; }\n", name, name);
+    emit(cg, "static void %s_push(%s *v, %s val) {\n", name, name, ct);
+    emit(cg, "    if (v->len >= v->cap) {\n");
+    emit(cg, "        v->cap = v->cap ? v->cap * 2 : 8;\n");
+    emit(cg, "        v->data = (%s*)realloc(v->data, sizeof(%s) * v->cap);\n", ct, ct);
+    emit(cg, "        if (!v->data) { exit(ERR_MEM); }\n");
+    emit(cg, "    }\n");
+    emit(cg, "    v->data[v->len++] = val;\n");
+    emit(cg, "}\n");
+    emit(cg, "static %s %s_get(%s *v, int i) {\n", ct, name, name);
+    emit(cg, "    if (i < 0 || i >= v->len) return (%s)0;\n", ct);
+    emit(cg, "    return v->data[i];\n");
+    emit(cg, "}\n");
+    emit(cg, "static void %s_set(%s *v, int i, %s val) {\n", name, name, ct);
+    emit(cg, "    if (i >= 0 && i < v->len) v->data[i] = val;\n");
+    emit(cg, "}\n");
+    emit(cg, "static int %s_len(%s *v) { return v->len; }\n", name, name);
+    emit(cg, "static %s %s_pop(%s *v) {\n", ct, name, name);
+    emit(cg, "    if (v->len == 0) return (%s)0;\n", ct);
+    emit(cg, "    return v->data[--v->len];\n");
+    emit(cg, "}\n");
+    emit(cg, "static void %s_free(%s *v) {\n", name, name);
+    emit(cg, "    if (v->data) { free(v->data); v->data = NULL; v->len = 0; v->cap = 0; }\n");
+    emit(cg, "}\n");
+    emit(cg, "\n");
+}
+
 /* ─────────────────────────────────────────────
    Collect Opt/ and @annotations before codegen
    ───────────────────────────────────────────── */
@@ -3227,6 +3837,18 @@ static void collect_functions(Codegen *cg, ASTNode *node) {
     if (!node) return;
     if ((node->kind == NODE_FUNC_DECL || node->kind == NODE_ASYNC_FUNC) && node->sval) {
         cg_sym_add(cg, node->sval, node->type_name ? node->type_name : "void", false);
+        /* v4.0: реестр узлов для arity-проверок (лямбды не вызываются по имени) */
+        if (!(node->annot && !strcmp(node->annot, "lambda")) &&
+            cg->fn_node_count < 512) {
+            bool dup = false;
+            for (int i = 0; i < cg->fn_node_count; i++)
+                if (!strcmp(cg->fn_names[i], node->sval)) { dup = true; break; }
+            if (!dup) {
+                cg->fn_nodes[cg->fn_node_count] = node;
+                snprintf(cg->fn_names[cg->fn_node_count], 128, "%s", node->sval);
+                cg->fn_node_count++;
+            }
+        }
     }
     /* Class methods: register as Type_method, AND register the class
        itself in the class registry for inheritance resolution. */
@@ -3380,6 +4002,9 @@ void codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug) {
 
     /* Pre-pass: используется ли тензорная библиотека */
     cg.need_tensor = ast_uses_tensor(root);
+
+    /* Pre-pass: какие Vector<T> используются — рантайм эмитится по типам */
+    cg_collect_vector_elems(&cg, root);
 
     /* emit runtime */
     emit_runtime(&cg);
