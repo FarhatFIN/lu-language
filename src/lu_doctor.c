@@ -884,7 +884,7 @@ int main(void) {
             "entry ok\n"
         },
         {
-            "python_logic_words",
+            "logic_words",
             "Lu/Language\n"
             "#q1\n"
             "bool t = True\n"
@@ -1043,9 +1043,9 @@ int main(void) {
             "}\n",
             "42\n"
         },
-        /* v4.0 iteration: C++-style constructors with arguments */
+        /* v4.0 iteration: constructors with arguments */
         {
-            "cpp_constructors",
+            "constructors",
             "Lu/Language\n"
             "class Vec2 {\n"
             "  int x\n"

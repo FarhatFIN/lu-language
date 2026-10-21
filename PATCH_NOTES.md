@@ -14,13 +14,13 @@
 - Публичный core остаётся сосредоточен на функциях, типах, управлении потоком,
   памяти и C-интеграции; предметные подсистемы должны жить в библиотеках.
 
-## v4.0 — «Simple Core»: уровень C++/asm, но проще
+## v4.0 — «Simple Core»: классы, указатели и asm без лишней сложности
 
-Цель релиза: возможности C++-ООП и низкоуровневого C там, где Lu отставал,
+Цель релиза: классы, указатели и прямой доступ к C там, где Lu отставал,
 и упрощение типового кода — один вывод типов вместо трёх рассыпанных
 эвристик, ошибки arity вместо молчаливого мусора.
 
-### Главное: конструкторы с аргументами (как в C++)
+### Главное: конструкторы с аргументами
 
 Раньше `new Type(args)` ломал компиляцию: парсер терял возвращаемый тип
 конструктора после `new(...)`, а codegen умел только примитивный
@@ -72,7 +72,7 @@ const int K = 7               // C-константность для локал�
 int m[2][2] = {{1, 2}, {3, 4}}  // вложенные скобки — раньше не парсились
 ```
 
-### Проще: Python-стиль print с несколькими аргументами
+### Проще: print с несколькими аргументами
 
 ```lu
 print(1, 2.5, "three", True)   // → 1 2.5 three true
@@ -112,7 +112,7 @@ print(1, 2.5, "three", True)   // → 1 2.5 three true
 
 ### Регрессия
 
-4 новых кейса доктора: `cpp_constructors`, `op_overload_auto`,
+4 новых кейса доктора: `constructors`, `op_overload_auto`,
 `sizeof_const`, `print_multiarg`. Гейт: `make clean && make && make test &&
 make test-all && make agent-test && make test-gui && ./bootstrap.sh &&
 ./fuzz_test.sh` — всё зелёное (65/65, 0 предупреждений, фаззинг 100/100).
@@ -134,7 +134,7 @@ doctor cases.
 - **`def` methods inside class bodies generated invalid C** — the class parser
   only recognised `Fn/` methods, so `def inc(int by) -> void { }` fell into the
   field-parsing branch and emitted garbage like `def inc;` into the C struct.
-  Python-style methods now parse via the same path as top-level `def`
+  Methods declared with `def` now parse via the same path as top-level `def`
   functions (extracted into `parse_def_func`) and are lowered exactly like
   `Fn/` methods, including `virtual`/`override` prefixes.
 - **`Vector<str>` / `Vector<float>` / any non-int element type didn't compile**
@@ -147,8 +147,8 @@ doctor cases.
   type (was hardcoded to int — would have misprinted `Vector<str>` results).
 - **Single-quoted strings were not lexed** — `str s = 'hello'` was a syntax
   error, and there was no way to nest quotes inside an f-string, so
-  `f"val={x > 5 ? 'big' : 'small'}"` failed. `'...'` and `f'...'` now work
-  (Python-style), with `\'` escape.
+  `f"val={x > 5 ? 'big' : 'small'}"` failed. `'...'` and `f'...'` now work,
+  with `\'` escape.
 - **`Recv/ch` received a value and threw it away** — as a statement the codegen
   emitted `lu_chan_recv(ch);` discarding the result, and it couldn't be used as
   an expression at all (`print(Recv/ch)` failed semantic analysis). `Recv/ch`
@@ -177,7 +177,7 @@ Gate: `make clean && make && make test && make test-all && make agent-test &&
   same way as before rather than silently changing.
 - Vector auto-init still requires the declaration to have no initialiser.
 
-## v3.2 — Bug fixes + Python logic words + inline asm + Tensor stdlib
+## v3.2 — Bug fixes + logic words + inline asm + Tensor stdlib
 
 ### Bugs fixed
 
@@ -186,7 +186,7 @@ Gate: `make clean && make && make test && make test-all && make agent-test &&
   `lu_user_main` and called first from the real entry point.
 - **f-string `{{`/`}}` escapes** — `f"{{literal}}"` previously swallowed `{{}}` as an
   empty expression and produced a confusing semantic error (`use of undeclared identifier '{'`).
-  Python-style escapes now work.
+  Brace escapes now work.
 - **String `==` compared pointers, not contents** — `"a"+"b" == "ab"` was pointer
   comparison (accidentally true for literals due to compiler dedup, false at runtime).
   Lowered to `strcmp(...) == 0`. Strict guards keep pointer comparisons intact:
@@ -199,7 +199,7 @@ Gate: `make clean && make && make test && make test-all && make agent-test &&
 
 ### New features
 
-- **Python logic words**: `and` / `or` / `not` (lowered to `&&` / `||` / `!`),
+- **Logic words**: `and` / `or` / `not` (lowered to `&&` / `||` / `!`),
   capitalized literals `True` / `False` / `None`.
 - **`in` operator**: `"ell" in "hello"` → `lu_str_contains(haystack, needle)`,
   precedence equal to comparisons.
@@ -208,7 +208,7 @@ Gate: `make clean && make && make test && make test-all && make agent-test &&
   into separate tokens). Lines joined with `\n\t` into one `__asm__ volatile("...")`.
   If a program contains any asm block, file-scope variables are emitted `volatile`
   so the optimizer cannot constant-fold reads that asm mutates.
-- **Tensor stdlib (PyTorch-flavor)**: `tensor_zeros/ones/full/eye`, elementwise
+- **Tensor stdlib**: `tensor_zeros/ones/full/eye`, elementwise
   `add/sub/mul/div`, `matmul`, `scale`, `transpose`, `relu`, `sigmoid`, reductions
   `sum/mean`, `get/set/fill/rows/cols/print/free`. Row-major double matrices.
   Runtime code is emitted into generated C only when the program actually uses
@@ -217,7 +217,7 @@ Gate: `make clean && make && make test && make test-all && make agent-test &&
 ### Regression coverage
 
 6 new cases in the doctor suite: `fstring_escape`, `def_main_entry`,
-`python_logic_words`, `str_eq_strcmp`, `asm_block`, `tensor_ops`.
+`logic_words`, `str_eq_strcmp`, `asm_block`, `tensor_ops`.
 Gate: `make clean && make && make test && make test-all && make agent-test &&
 ./bootstrap.sh && ./fuzz_test.sh` — all green (55/55 doctor cases).
 
@@ -284,26 +284,26 @@ documented above; these constructs now produce a compilation error.
 
 ---
 
-## v3.0 — C/C++/Zig feature parity
+## v3.0 — Массивы, указатели, классы и управление ресурсами
 
 ### Added in 7 iterations
 
-**C-core:**
+**Базовые конструкции:**
 - Multi-dimensional arrays `int m[3][3]`, `int cube[2][2][2]`
 - Type casting `(int)3.7`, `(byte)x`
 - printf/fprintf with full format specifiers
 - Pointer arithmetic `p + 1`, `p += 1`, `p - arr`
-- Function pointers `fn(int, int) -> int op = add` (Zig-style)
+- Function pointers `fn(int, int) -> int op = add`
 - `union` type
 
-**C++:**
+**Объекты и классы:**
 - Inheritance `class Dog extends Animal` with proper struct layout
 - Inherited methods and fields (walks class hierarchy)
 - `super.method()` for parent method calls
 - Operator overloading `op+`, `op==` — `a + b` → `Vec2_op_add(&a, b)`
 - Lambdas `fn(int a, int b) -> int { return a + b }`
 
-**Zig:**
+**Ресурсы, опциональные типы и срезы:**
 - `defer` — scope-exit cleanup via GCC nested functions + cleanup attribute
 - Optionals `?T` — `?int maybe = null` → `int* maybe = NULL`
 - `null` literal → `NULL`
@@ -406,7 +406,7 @@ This also fixes the same class of bug for these previously-unhandled node types 
 
 ## v2.1 — f-strings v2 + match/case
 
-This release replaces the string-based f-string implementation with a real AST-based parser, and adds Python 3.10-style `match/case`.
+This release replaces the string-based f-string implementation with a real AST-based parser, and adds `match/case`.
 
 ### F-strings v2 (real expression parsing)
 
@@ -428,7 +428,7 @@ The previous f-string implementation used text-based heuristics to determine the
 - f-strings now participate correctly in `auto` inference: `auto s = f"x={x}"` → `char*`.
 - f-strings work in string concatenation: `f"a={a}" + f"b={b}"`.
 
-### match/case (Python 3.10-style pattern matching)
+### match/case
 
 New `match`/`case`/`default` construct, lowered to an `if/else if` chain:
 
@@ -465,7 +465,7 @@ match code {
 
 ---
 
-## v2.0 — Python-style syntax + C++ capabilities
+## v2.0 — Компактный синтаксис и возможности ООП
 
 This build is still a small young compiler, but the core is now much more usable for writing real Lu programs.
 
@@ -524,7 +524,7 @@ This release fixes several parser/codegen bugs that could hang the compiler or p
 - Existing bundled Lu programs still compile, build and run.
 - `bootstrap.sh` still verifies self-hosting output identity.
 
-### C++-inspired low-level OOP lowering
+### Низкоуровневая реализация ООП
 
 Lu now has a practical C backend for simple classes:
 
