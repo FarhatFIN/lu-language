@@ -67,9 +67,11 @@ int main(int argc, char **argv) {
         switch (c) {
         case 'o': outfile  = optarg; break;
         case 'O':
-            opt_lvl = atoi(optarg);
-            if (opt_lvl < 0) opt_lvl = 0;
-            if (opt_lvl > 3) opt_lvl = 3;
+            if (strlen(optarg) != 1 || optarg[0] < '0' || optarg[0] > '3') {
+                fprintf(stderr, "[luc] invalid optimisation level '%s': expected 0-3\n", optarg);
+                return 1;
+            }
+            opt_lvl = optarg[0] - '0';
             break;
         case 'd': debug    = true; break;
         case 't': dump_tok = true; break;
@@ -84,6 +86,10 @@ int main(int argc, char **argv) {
     }
 
     if (optind >= argc) { usage(argv[0]); return 1; }
+    if (argc - optind != 1) {
+        fprintf(stderr, "[luc] expected exactly one source file\n");
+        return 1;
+    }
     const char *srcpath = argv[optind];
 
     /* ── Read source ── */
@@ -139,7 +145,7 @@ int main(int argc, char **argv) {
     /* ── Semantic analysis ── */
     SymTable syms = {0};
     semantic_check(root, &syms);
-    if (stats)
+    if (stats && g_parse_error_count == 0)
         fprintf(stderr, "[luc] semantic check OK (%d symbols)\n", syms.count);
 
     /* If semantic analysis found errors (undeclared identifiers etc.),
@@ -161,19 +167,34 @@ int main(int argc, char **argv) {
 
     /* ── Code generation ── */
     FILE *out = fopen(outfile, "w");
-    if (!out) { perror(outfile); return 1; }
+    if (!out) {
+        perror(outfile);
+        ast_free(root);
+        free(src);
+        free(auto_out);
+        return 1;
+    }
 
     codegen_run(root, out, opt_lvl, debug);
 
-    fclose(out);
+    /* Check both earlier writes and the final buffered write on close. */
+    bool write_failed = ferror(out) != 0;
+    if (fclose(out) != 0) write_failed = true;
     ast_free(root);
     free(src);
+
+    if (write_failed) {
+        fprintf(stderr, "[luc] failed to write output '%s'\n", outfile);
+        free(auto_out);
+        return 1;
+    }
 
     /* If codegen found errors (e.g. On/ with string, Spawn/ with int),
        the output file may be invalid — return error. */
     if (g_parse_error_count > 0) {
         fprintf(stderr, "[luc] %d error(s) during code generation — output may be invalid\n",
                 g_parse_error_count);
+        free(auto_out);
         return 1;
     }
 

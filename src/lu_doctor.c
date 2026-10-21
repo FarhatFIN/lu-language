@@ -98,7 +98,7 @@ static int run_case(const LuCase *tc) {
 
     snprintf(cmd, sizeof(cmd),
              "gcc -std=c11 -Wall -Wextra -Wpedantic "
-             "-Wno-unused-function -Wno-unused-variable -I. -o %s %s -lm > %s 2>&1",
+             "-Wno-unused-function -Wno-unused-variable -I. -I../include -o %s %s -lm > %s 2>&1",
              exe_path, c_path, gcc_log);
     if (!run_cmd(cmd)) {
         printf("[c-backend-agent] FAIL %s\n", tc->name);
@@ -932,6 +932,7 @@ int main(void) {
         {
             "tensor_ops",
             "Lu/Language\n"
+            "#include <tensor.h>\n"
             "def main() -> void {\n"
             "  Tensor a = tensor_zeros(2, 2)\n"
             "  tensor_set(a, 0, 0, 1)\n"

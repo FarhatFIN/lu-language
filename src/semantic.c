@@ -246,6 +246,13 @@ static const char *find_enum_for_member(SymTable *st, const char *member) {
    ───────────────────────────────────────────── */
 static void first_pass(ASTNode *node, SymTable *st, BlockRegistry *br) {
     if (!node) return;
+    switch (node->kind) {
+    case NODE_SERVER_DECL: case NODE_SEND: case NODE_RECV:
+    case NODE_BCAST: case NODE_ROUTE: case NODE_INQ:
+        lu_error(node->line, "network stubs were removed; use a real networking library via #include");
+        break;
+    default: break;
+    }
     if (node->kind == NODE_BLOCK) {
         /* register block in registry */
         BlockInfo *bi = breg_get_or_create(br, node->block_n);
@@ -443,6 +450,31 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
 
     case NODE_FUNC_CALL:
         if (node->sval) {
+            const LibraryFunction *fn = tensor_function(node->sval);
+            if (fn && sym_find(st, "Tensor") && node->children.count == fn->arity) {
+                for (int i = 0; i < fn->arity; i++) {
+                    ASTNode *arg = node->children.items[i];
+                    const char *actual = infer_type(st, arg);
+                    const char *expected = fn->params[i];
+                    bool numeric = !strcmp(actual, "int") || !strcmp(actual, "int64") ||
+                                   !strcmp(actual, "byte");
+                    bool null_arg = arg->kind == NODE_LITERAL_INT && arg->sval &&
+                                    !strcmp(arg->sval, "null");
+                    bool valid = !strcmp(actual, expected) ||
+                        (!strcmp(expected, "float") && numeric) ||
+                        (!strcmp(expected, "int") && numeric) ||
+                        (!strcmp(expected, "Tensor") && null_arg);
+                    if (!valid && strcmp(actual, "auto"))
+                        lu_error(node->line, "'%s' argument %d expects %s, got %s",
+                                 fn->name, i + 1, expected, actual);
+                }
+            }
+            if (!strcmp(node->sval, "lu_send") || !strcmp(node->sval, "lu_recv") ||
+                !strcmp(node->sval, "lu_broadcast") || !strcmp(node->sval, "lu_route") ||
+                !strcmp(node->sval, "lu_inq") || !strcmp(node->sval, "lu_server_new")) {
+                lu_error(node->line, "network stubs were removed; use a real networking library via #include");
+                break;
+            }
             const char *dot = strchr(node->sval, '.');
             if (dot && dot != node->sval && dot[1]) {
                 char obj[128];
@@ -636,6 +668,7 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
    Public entry point
    ───────────────────────────────────────────── */
 bool semantic_check(ASTNode *root, SymTable *st) {
+    check_library_usage(root);
     /* ── Pre-populate C / Lu built-ins ── */
     sym_add(st, "malloc",   "ptr",  -1, true,  true,  false, 0);
     sym_add(st, "calloc",   "ptr",  -1, true,  true,  false, 0);
@@ -669,16 +702,10 @@ bool semantic_check(ASTNode *root, SymTable *st) {
     sym_add(st, "lu_self_lex_cast",     "int",  -1, false, true, false, 0);
     sym_add(st, "lu_self_codegen_cast", "void", -1, false, true, false, 0);
     /* Lu runtime */
-    sym_add(st, "lu_send",       "void", -1, false, true, false, 0);
-    sym_add(st, "lu_recv",       "void", -1, false, true, false, 0);
-    sym_add(st, "lu_broadcast",  "void", -1, false, true, false, 0);
-    sym_add(st, "lu_route",      "void", -1, false, true, false, 0);
-    sym_add(st, "lu_inq",        "void", -1, false, true, false, 0);
     sym_add(st, "lu_log",        "void", -1, false, true, false, 0);
     sym_add(st, "lu_throw",      "void", -1, false, true, false, 0);
     sym_add(st, "lu_assert",     "void", -1, false, true, false, 0);
     sym_add(st, "lu_user_new",   "auto", -1, false, true, false, 0);
-    sym_add(st, "lu_server_new", "ptr",  -1, true,  true, false, 0);
     sym_add(st, "lu_spawn",      "void", -1, false, true, false, 0);
     sym_add(st, "lu_chan_new",   "ptr",  -1, true,  true, false, 0);
     sym_add(st, "lu_chan_send",      "void", -1, false, true, false, 0);
@@ -724,30 +751,13 @@ bool semantic_check(ASTNode *root, SymTable *st) {
     sym_add(st, "write_file", "void", -1, false, true, false, 0);
     sym_add(st, "input",      "str",  -1, false, true, false, 0);
 
-    /* ── Standard library: tensor (PyTorch-flavor) ── */
-    sym_add(st, "Tensor",         "type",  -1, false, false, true, 0);
-    sym_add(st, "tensor_zeros",   "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_ones",    "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_full",    "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_eye",     "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_add",     "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_sub",     "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_mul",     "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_div",     "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_scale",   "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_matmul",  "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_transpose","Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_relu",    "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_sigmoid", "Tensor", -1, false, true, false, 0);
-    sym_add(st, "tensor_get",     "float",  -1, false, true, false, 0);
-    sym_add(st, "tensor_set",     "void",   -1, false, true, false, 0);
-    sym_add(st, "tensor_fill",    "void",   -1, false, true, false, 0);
-    sym_add(st, "tensor_sum",     "float",  -1, false, true, false, 0);
-    sym_add(st, "tensor_mean",    "float",  -1, false, true, false, 0);
-    sym_add(st, "tensor_rows",    "int",    -1, false, true, false, 0);
-    sym_add(st, "tensor_cols",    "int",    -1, false, true, false, 0);
-    sym_add(st, "tensor_print",   "void",   -1, false, true, false, 0);
-    sym_add(st, "tensor_free",    "void",   -1, false, true, false, 0);
+    if (has_tensor_import(root)) {
+        size_t count;
+        const LibraryFunction *api = tensor_api(&count);
+        sym_add(st, "Tensor", "type", -1, false, false, true, 0);
+        for (size_t i = 0; i < count; i++)
+            sym_add(st, api[i].name, api[i].result, -1, false, true, false, 0);
+    }
 
     /* ── Standard library: range ── */
     sym_add(st, "range", "ptr", -1, true, true, false, 0);
@@ -765,7 +775,8 @@ bool semantic_check(ASTNode *root, SymTable *st) {
     g_has_c_headers = false;
     for (int i = 0; i < root->children.count; i++) {
         ASTNode *n = root->children.items[i];
-        if (n->kind == NODE_IMPORT && n->sval &&
+        if ((n->kind == NODE_IMPORT || n->kind == NODE_INCLUDE) && n->sval &&
+            !is_tensor_import(n) &&
             (n->sval[0] == '<' || n->sval[0] == '"'))
             g_has_c_headers = true;
     }

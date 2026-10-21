@@ -1,5 +1,19 @@
 # Patch notes: Lu compiler hardening pass
 
+## Core hardening — optional tensor library and removal of fake networking
+
+- `Tensor` больше не является неявной частью языка. Для него обязательна точная
+  директива `#include <tensor.h>`.
+- Реализация вынесена из `codegen.c` в самостоятельную header-only библиотеку
+  `include/tensor.h`; генерируемый C содержит только include и вызовы API.
+- Компилятор проверяет наличие библиотеки, arity и базовые типы аргументов
+  `tensor_*`. В рантайме проверяются размеры, формы, индексы, деление на ноль и
+  ошибки выделения памяти.
+- Удалены печатающие сетевые заглушки `Server`, `Snd`, `Rec`, `Bcast`, `Route`,
+  `inq` и их C-рантайм. Их использование теперь является ошибкой компиляции.
+- Публичный core остаётся сосредоточен на функциях, типах, управлении потоком,
+  памяти и C-интеграции; предметные подсистемы должны жить в библиотеках.
+
 ## v4.0 — «Simple Core»: уровень C++/asm, но проще
 
 Цель релиза: возможности C++-ООП и низкоуровневого C там, где Lu отставал,
@@ -256,7 +270,8 @@ These v1.x network primitives were marked "experimental, untested" in v2.1.2. Af
 - `Bcast{payload}` — generates `lu_broadcast()` stub, no actual broadcast
 - `Snd{payload}` — generates `lu_send()` stub, no actual networking
 
-Using them produces a deprecation warning. They will be removed in v4.0.
+This deprecated compatibility layer was removed in the core-hardening pass
+documented above; these constructs now produce a compilation error.
 
 ### Build quality
 
@@ -481,7 +496,7 @@ This release fixes several parser/codegen bugs that could hang the compiler or p
 
 ### Template class methods
 
-- Methods of `template<T>` classes now lower `T` to `void*` in their signatures too (previously only fields were lowered). Calling these methods with non-pointer arguments still requires manual casts — full monomorphization is still future work.
+- Methods of `template<T>` classes now lower `T` to `void*` in their signatures too (previously only fields were lowered). Calling these methods with non-pointer arguments requires manual casts; full monomorphization is not implemented.
 
 ### Version
 
@@ -592,18 +607,6 @@ make test-all
 ```
 
 All passed.
-
-## Still experimental
-
-These are not yet full production features:
-
-- full C++-style constructors in `new Type(args...)`
-- real templates / monomorphization
-- virtual dispatch / inheritance ABI
-- full exception semantics for `Try/Catch`
-- real async scheduler
-
-The stable core is now stronger: functions, blocks, variables, arithmetic, arrays, structs, enums, basic class lowering, methods, pointers, allocation, and generated C build flow.
 
 ## C core turnkey pass
 

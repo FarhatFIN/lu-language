@@ -6,10 +6,10 @@ CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic \
 	  -Wno-overlength-strings \
 	  -g -O2
 TARGET  = luc
-SRCS    = main.c lexer.c parser.c semantic.c codegen.c util.c
+SRCS    = main.c lexer.c parser.c semantic.c codegen.c libraries.c util.c
 OBJS    = $(SRCS:.c=.o)
 
-.PHONY: all clean test test-all test-gui bootstrap doctor agent-test fuzz
+.PHONY: all clean test test-all test-cli test-gui bootstrap doctor agent-test fuzz
 
 all: $(TARGET)
 
@@ -30,7 +30,7 @@ test: $(TARGET) example.lu
 # Full regression pass over bundled Lu programs.
 # calculator_gui.lu is excluded: it needs an X11 display and blocks
 # waiting for events — build it with `make test-gui` instead.
-test-all: $(TARGET)
+test-all: $(TARGET) test-cli
 	@rm -rf .lu_test_build
 	@mkdir -p .lu_test_build
 	@set -e; \
@@ -39,10 +39,14 @@ test-all: $(TARGET)
 	        if [ "$$base" = "calculator_gui" ]; then continue; fi; \
 	        echo "[LU TEST] $$f"; \
 	        ./$(TARGET) $$f -o .lu_test_build/$$base.c >/dev/null; \
-	        $(CC) -O2 -std=c11 -I. -o .lu_test_build/$$base .lu_test_build/$$base.c -lm; \
+	        $(CC) -O2 -std=c11 -I. -I../include -o .lu_test_build/$$base .lu_test_build/$$base.c -lm; \
 	        .lu_test_build/$$base >/dev/null; \
 	done
 	@echo "[LU TEST] all bundled Lu programs compiled and ran"
+
+# CLI validation and file I/O error regressions.
+test-cli: $(TARGET)
+	sh ../tests/cli_test.sh
 
 # GUI demo: compile + link the X11 calculator (no run — needs a display).
 test-gui: $(TARGET) calculator_gui.lu

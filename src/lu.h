@@ -428,8 +428,6 @@ typedef struct {
     bool has_user_main;
     /* программа содержит asm-блоки → глобали эмитятся volatile */
     bool has_asm;
-    /* программа использует tensor_* → эмитить тензорный рантайм */
-    bool need_tensor;
     /* типы элементов Vector<T>, реально использованные в программе —
        рантайм эмитится только для них (int не «бесплатно» предполагается) */
     char vector_elems[16][32];
@@ -459,6 +457,19 @@ void     ast_print(ASTNode *node, int depth);
 
 /* semantic.c */
 bool  semantic_check(ASTNode *root, SymTable *syms);
+
+/* libraries.c: signatures of optional libraries, not their implementation. */
+typedef struct {
+    const char *name;
+    const char *result;
+    int arity;
+    const char *params[4];
+} LibraryFunction;
+const LibraryFunction *tensor_api(size_t *count);
+const LibraryFunction *tensor_function(const char *name);
+bool is_tensor_import(const ASTNode *node);
+bool has_tensor_import(const ASTNode *root);
+void check_library_usage(ASTNode *root);
 
 /* codegen.c */
 void  codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug);

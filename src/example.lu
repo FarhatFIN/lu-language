@@ -2,7 +2,6 @@ Lu/Language
 
 M/ us *user*
 
-Def:const MAX = 100
 Def:config timeout = 5000
 
 // ── Обучающий блок: задача 2+2 ──

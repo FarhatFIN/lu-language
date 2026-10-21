@@ -43,7 +43,6 @@ static const char *lu2c(const char *t) {
     if (!strcmp(t,"msg"))   return "lu_msg_t";
     if (!strcmp(t,"lib"))   return "void*";
     if (!strcmp(t,"void"))  return "void";
-    if (!strcmp(t,"Tensor")) return "lu_tensor_t*";
     if (!strcmp(t,"auto"))  return "int"; /* fallback, usually overridden */
     /* Optional ?T → lowered to T* (NULL = no value, non-NULL = has value).
        This is a simplification of Zig's ?T but works for the common case. */
@@ -917,14 +916,6 @@ static const char *lu_type_of(Codegen *cg, ASTNode *n, bool *is_ptr) {
             return "str";
         if (!strcmp(n->sval, "contains"))
             return "bool";
-        if (n->sval[0] == 't' && !strncmp(n->sval, "tensor_", 7)) {
-            if (!strcmp(n->sval, "tensor_rows") || !strcmp(n->sval, "tensor_cols"))
-                return "int";
-            if (!strcmp(n->sval, "tensor_sum") || !strcmp(n->sval, "tensor_mean") ||
-                !strcmp(n->sval, "tensor_get"))
-                return "float";
-            return "Tensor";
-        }
         /* вызов переменной функционального типа: fn:int,int->int */
         Symbol *s = cg_sym_find(cg, n->sval);
         if (s && !strncmp(s->type, "fn:", 3)) {
@@ -941,6 +932,7 @@ static const char *lu_type_of(Codegen *cg, ASTNode *n, bool *is_ptr) {
             cg_check_arity(cg, n->sval, n->line, fn, n->children.count);
             return fn->type_name ? fn->type_name : "void";
         }
+        if (s && s->is_func) return s->type;
         return "auto";
     }
 
@@ -1004,7 +996,6 @@ static const char *expr_kind_legacy(Codegen *cg, ASTNode *n) {
             const char *rt = expr_kind_from_ast(cg, n->children.count > 1 ? n->children.items[1] : NULL);
             if (!strcmp(lt, "str") || !strcmp(rt, "str")) return "str";
         }
-        /* tensor_* возвращают Tensor; числовые редукции — числа */
         const char *lt = expr_kind_from_ast(cg, n->children.count > 0 ? n->children.items[0] : NULL);
         const char *rt = expr_kind_from_ast(cg, n->children.count > 1 ? n->children.items[1] : NULL);
         if (!strcmp(lt, "float") || !strcmp(rt, "float")) return "float";
@@ -1085,14 +1076,6 @@ static const char *expr_kind_legacy(Codegen *cg, ASTNode *n) {
                     return "str";
                 if (!strcmp(n->sval, "contains"))
                     return "bool";
-                /* Tensor stdlib: редукции и геттеры */
-                if (!strcmp(n->sval, "tensor_rows") || !strcmp(n->sval, "tensor_cols"))
-                    return "int";
-                if (!strcmp(n->sval, "tensor_sum") || !strcmp(n->sval, "tensor_mean") ||
-                    !strcmp(n->sval, "tensor_get"))
-                    return "float";
-                if (n->sval[0] == 't' && !strncmp(n->sval, "tensor_", 7))
-                    return "auto";   /* конструкторы/операции → Tensor, не для concat */
                 /* User-defined function: look up in symbol table */
                 Symbol *s = cg_sym_find(cg, n->sval);
                 if (s) {
@@ -1760,12 +1743,6 @@ static void gen_expr(Codegen *cg, ASTNode *n) {
             else if (!strcmp(name, "read_file")) emit_name = "lu_read_file";
             else if (!strcmp(name, "write_file")) emit_name = "lu_write_file";
             else if (!strcmp(name, "input")) emit_name = "lu_input";
-            /* Tensor stdlib: tensor_* → lu_tensor_* */
-            else if (name[0] == 't' && !strncmp(name, "tensor_", 7)) {
-                static char tbuf[128];
-                snprintf(tbuf, sizeof(tbuf), "lu_%s", name);
-                emit_name = tbuf;
-            }
             emit(cg, "%s(", emit_name);
             for (int i = 0; i < n->children.count; i++) {
                 if (i) emit(cg, ", ");
@@ -2061,7 +2038,7 @@ static void gen_class_method_definitions(Codegen *cg, ASTNode *cls) {
 static bool top_level_skip_after_preamble(ASTNode *n) {
     if (!n) return true;
     switch (n->kind) {
-    case NODE_LANG_DECL: case NODE_IMPORT: case NODE_MODE: case NODE_OPT:
+    case NODE_LANG_DECL: case NODE_IMPORT: case NODE_INCLUDE: case NODE_MODE: case NODE_OPT:
     case NODE_ANNOT: case NODE_MODULE: case NODE_DEFINE:
     case NODE_DEF_CONST: case NODE_DEF_CONFIG:
     case NODE_STRUCT_DECL: case NODE_UNION_DECL: case NODE_ENUM_DECL:
@@ -2721,56 +2698,6 @@ static void gen_node(Codegen *cg, ASTNode *n) {
               n->sval ? n->sval : "");
         return;
 
-    /* ── Server declaration ── */
-    case NODE_SERVER_DECL:
-        lu_warn(n->line, "Server/ is deprecated — generates stub code, no real network functionality. Will be removed in v4.0.");
-        iemit(cg, "/* DEPRECATED: Server/ — stub only */\n");
-        iemit(cg, "lu_server_t *_server_q%d = lu_server_new(%d, \"%s\");\n",
-              n->block_n, n->block_n, n->sval ? n->sval : "");
-        return;
-
-    /* ── Network send (deprecated) ── */
-    case NODE_SEND: {
-        lu_warn(n->line, "Snd{} is deprecated — generates stub code, no real network functionality. Will be removed in v4.0.");
-        if (n->children.count > 0 && n->children.items[0]->kind == NODE_LITERAL_IP) {
-            iemit(cg, "/* DEPRECATED */ lu_send(\"%s\", &(", n->sval ? n->sval : "");
-            gen_expr(cg, n->children.items[0]);
-            emit(cg, "));\n");
-        } else {
-            iemit(cg, "/* DEPRECATED */ lu_send(\"%s\", NULL);\n", n->sval ? n->sval : "");
-        }
-        return;
-    }
-
-    /* ── Network recv (deprecated) ── */
-    case NODE_RECV:
-        lu_warn(n->line, "Rec/ is deprecated — generates stub code. Will be removed in v4.0.");
-        iemit(cg, "/* DEPRECATED */ lu_recv(");
-        gen_expr(cg, n->children.count > 0 ? n->children.items[0] : NULL);
-        emit(cg, ");\n");
-        return;
-
-    /* ── Bcast (deprecated) ── */
-    case NODE_BCAST:
-        lu_warn(n->line, "Bcast{} is deprecated — generates stub code. Will be removed in v4.0.");
-        iemit(cg, "/* DEPRECATED */ lu_broadcast(\"%s\");\n", n->sval ? n->sval : "");
-        return;
-
-    /* ── Route (deprecated) ── */
-    case NODE_ROUTE:
-        lu_warn(n->line, "Route/ is deprecated — generates stub code. Will be removed in v4.0.");
-        iemit(cg, "/* DEPRECATED */ lu_route(");
-        gen_expr(cg, n->children.count > 0 ? n->children.items[0] : NULL);
-        emit(cg, ", ");
-        gen_expr(cg, n->children.count > 1 ? n->children.items[1] : NULL);
-        emit(cg, ");\n");
-        return;
-
-    /* ── inq; ── */
-    case NODE_INQ:
-        iemit(cg, "lu_inq(\"%s\");\n", n->sval ? n->sval : "");
-        return;
-
     /* ── Memory management ── */
     case NODE_ALLOC: {
         /* used as expression in var decl; here emit as standalone call */
@@ -3202,7 +3129,6 @@ static void emit_runtime(Codegen *cg) {
 "typedef struct { int *vals; int len; }                  lu_cor_t;\n"
 "typedef struct { char *data; int len; }                 lu_msg_t;\n"
 "typedef struct { char nic[64]; char name[64]; lu_ip_t ip; } lu_user_t;\n"
-"typedef struct { int id; char meta[256]; }              lu_server_t;\n"
 "typedef struct { void **buf; int head, tail, cap; }     lu_chan_t;\n"
 "typedef struct { char name[64]; void(*cb)(void*); }    lu_event_t;\n"
 "\n"
@@ -3244,38 +3170,6 @@ static void emit_runtime(Codegen *cg) {
 "\n"
 "static lu_user_t lu_user_new(const char *attrs) {\n"
 "    lu_user_t u = {0}; strncpy(u.nic, attrs, 63); return u;\n"
-"}\n"
-"\n"
-"static lu_server_t *lu_server_new(int id, const char *meta) {\n"
-"    lu_server_t *s = calloc(1, sizeof(lu_server_t));\n"
-"    if (!s) { fprintf(stderr, \"[Lu MEM] out of memory\\n\"); exit(ERR_MEM); }\n"
-"    s->id = id; strncpy(s->meta, meta ? meta : \"\", sizeof(s->meta) - 1);\n"
-"    return s;\n"
-"}\n"
-"\n"
-"static void lu_send(const char *data, lu_ip_t *dest) {\n"
-"    if (dest)\n"
-"        printf(\"[Lu NET] send '%s' -> %d.%d.%d.%d:%d\\n\",\n"
-"               data, dest->a, dest->b, dest->c, dest->d, dest->port);\n"
-"    else\n"
-"        printf(\"[Lu NET] send '%s'\\n\", data);\n"
-"}\n"
-"\n"
-"static void lu_recv(const char *expected) {\n"
-"    printf(\"[Lu NET] recv '%s'\\n\", expected ? expected : \"\");\n"
-"}\n"
-"\n"
-"static void lu_broadcast(const char *data) {\n"
-"    printf(\"[Lu NET] broadcast '%s'\\n\", data);\n"
-"}\n"
-"\n"
-"static void lu_route(lu_ip_t dst, lu_ip_t via) {\n"
-"    printf(\"[Lu NET] route %d.%d.%d.%d:%d via %d.%d.%d.%d:%d\\n\",\n"
-"           dst.a,dst.b,dst.c,dst.d,dst.port,via.a,via.b,via.c,via.d,via.port);\n"
-"}\n"
-"\n"
-"static void lu_inq(const char *req) {\n"
-"    printf(\"[Lu NET] inq: %s\\n\", req);\n"
 "}\n"
 "\n"
 "static void lu_log(const char *level, const char *msg) {\n"
@@ -3578,137 +3472,6 @@ fputs(
 "\n"
 , cg->out);
 
-/* Tensor stdlib — только если программа её использует
-   (иначе тащим зависимость от libm в каждую программу). */
-if (cg->need_tensor) {
-    fputs(
-"/* ── Tensor stdlib (PyTorch-flavor): матрицы double, row-major ── */\n"
-"typedef struct { int rows, cols; double *data; } lu_tensor_t;\n"
-"\n"
-"static lu_tensor_t *lu_tensor_new(int r, int c) {\n"
-"    if (r <= 0 || c <= 0) { fprintf(stderr, \"tensor: bad shape %dx%d\\n\", r, c); exit(1); }\n"
-"    lu_tensor_t *t = (lu_tensor_t*)malloc(sizeof(lu_tensor_t));\n"
-"    t->rows = r; t->cols = c;\n"
-"    t->data = (double*)calloc((size_t)r * c, sizeof(double));\n"
-"    return t;\n"
-"}\n"
-"static void lu_tensor_free(lu_tensor_t *t) {\n"
-"    if (!t) return;\n"
-"    free(t->data); free(t);\n"
-"}\n"
-"static double lu_tensor_get(lu_tensor_t *t, int i, int j) {\n"
-"    if (!t || i < 0 || i >= t->rows || j < 0 || j >= t->cols) return 0.0;\n"
-"    return t->data[(size_t)i * t->cols + j];\n"
-"}\n"
-"static void lu_tensor_set(lu_tensor_t *t, int i, int j, double v) {\n"
-"    if (!t || i < 0 || i >= t->rows || j < 0 || j >= t->cols) return;\n"
-"    t->data[(size_t)i * t->cols + j] = v;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_full(int r, int c, double v) {\n"
-"    lu_tensor_t *t = lu_tensor_new(r, c);\n"
-"    for (size_t k = 0; k < (size_t)r * c; k++) t->data[k] = v;\n"
-"    return t;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_zeros(int r, int c) { return lu_tensor_full(r, c, 0.0); }\n"
-"static lu_tensor_t *lu_tensor_ones(int r, int c)  { return lu_tensor_full(r, c, 1.0); }\n"
-"static lu_tensor_t *lu_tensor_eye(int n) {\n"
-"    lu_tensor_t *t = lu_tensor_zeros(n, n);\n"
-"    for (int i = 0; i < n; i++) t->data[(size_t)i * n + i] = 1.0;\n"
-"    return t;\n"
-"}\n"
-"static void lu_tensor_fill(lu_tensor_t *t, double v) {\n"
-"    if (!t) return;\n"
-"    for (size_t k = 0; k < (size_t)t->rows * t->cols; k++) t->data[k] = v;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_map2(lu_tensor_t *a, lu_tensor_t *b, char op) {\n"
-"    if (!a || !b || a->rows != b->rows || a->cols != b->cols) {\n"
-"        fprintf(stderr, \"tensor: shape mismatch for elementwise '%c'\\n\", op);\n"
-"        exit(1);\n"
-"    }\n"
-"    lu_tensor_t *t = lu_tensor_new(a->rows, a->cols);\n"
-"    for (size_t k = 0; k < (size_t)a->rows * a->cols; k++) {\n"
-"        switch (op) {\n"
-"            case '+': t->data[k] = a->data[k] + b->data[k]; break;\n"
-"            case '-': t->data[k] = a->data[k] - b->data[k]; break;\n"
-"            case '*': t->data[k] = a->data[k] * b->data[k]; break;\n"
-"            case '/': t->data[k] = b->data[k] != 0.0 ? a->data[k] / b->data[k] : 0.0; break;\n"
-"        }\n"
-"    }\n"
-"    return t;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_add(lu_tensor_t *a, lu_tensor_t *b) { return lu_tensor_map2(a, b, '+'); }\n"
-"static lu_tensor_t *lu_tensor_sub(lu_tensor_t *a, lu_tensor_t *b) { return lu_tensor_map2(a, b, '-'); }\n"
-"static lu_tensor_t *lu_tensor_mul(lu_tensor_t *a, lu_tensor_t *b) { return lu_tensor_map2(a, b, '*'); }\n"
-"static lu_tensor_t *lu_tensor_div(lu_tensor_t *a, lu_tensor_t *b) { return lu_tensor_map2(a, b, '/'); }\n"
-"static lu_tensor_t *lu_tensor_scale(lu_tensor_t *a, double s) {\n"
-"    if (!a) return NULL;\n"
-"    lu_tensor_t *t = lu_tensor_new(a->rows, a->cols);\n"
-"    for (size_t k = 0; k < (size_t)a->rows * a->cols; k++) t->data[k] = a->data[k] * s;\n"
-"    return t;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_matmul(lu_tensor_t *a, lu_tensor_t *b) {\n"
-"    if (!a || !b || a->cols != b->rows) {\n"
-"        fprintf(stderr, \"tensor: matmul shape mismatch %dx%d @ %dx%d\\n\",\n"
-"                a ? a->rows : 0, a ? a->cols : 0, b ? b->rows : 0, b ? b->cols : 0);\n"
-"        exit(1);\n"
-"    }\n"
-"    lu_tensor_t *t = lu_tensor_zeros(a->rows, b->cols);\n"
-"    for (int i = 0; i < a->rows; i++)\n"
-"        for (int k = 0; k < a->cols; k++) {\n"
-"            double av = a->data[(size_t)i * a->cols + k];\n"
-"            if (av == 0.0) continue;\n"
-"            for (int j = 0; j < b->cols; j++)\n"
-"                t->data[(size_t)i * b->cols + j] += av * b->data[(size_t)k * b->cols + j];\n"
-"        }\n"
-"    return t;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_transpose(lu_tensor_t *a) {\n"
-"    if (!a) return NULL;\n"
-"    lu_tensor_t *t = lu_tensor_new(a->cols, a->rows);\n"
-"    for (int i = 0; i < a->rows; i++)\n"
-"        for (int j = 0; j < a->cols; j++)\n"
-"            t->data[(size_t)j * a->rows + i] = a->data[(size_t)i * a->cols + j];\n"
-"    return t;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_relu(lu_tensor_t *a) {\n"
-"    if (!a) return NULL;\n"
-"    lu_tensor_t *t = lu_tensor_new(a->rows, a->cols);\n"
-"    for (size_t k = 0; k < (size_t)a->rows * a->cols; k++)\n"
-"        t->data[k] = a->data[k] > 0.0 ? a->data[k] : 0.0;\n"
-"    return t;\n"
-"}\n"
-"static lu_tensor_t *lu_tensor_sigmoid(lu_tensor_t *a) {\n"
-"    if (!a) return NULL;\n"
-"    lu_tensor_t *t = lu_tensor_new(a->rows, a->cols);\n"
-"    for (size_t k = 0; k < (size_t)a->rows * a->cols; k++)\n"
-"        t->data[k] = 1.0 / (1.0 + exp(-a->data[k]));\n"
-"    return t;\n"
-"}\n"
-"static double lu_tensor_sum(lu_tensor_t *t) {\n"
-"    if (!t) return 0.0;\n"
-"    double s = 0.0;\n"
-"    for (size_t k = 0; k < (size_t)t->rows * t->cols; k++) s += t->data[k];\n"
-"    return s;\n"
-"}\n"
-"static double lu_tensor_mean(lu_tensor_t *t) {\n"
-"    if (!t || t->rows * t->cols == 0) return 0.0;\n"
-"    return lu_tensor_sum(t) / (double)((size_t)t->rows * t->cols);\n"
-"}\n"
-"static int lu_tensor_rows(lu_tensor_t *t) { return t ? t->rows : 0; }\n"
-"static int lu_tensor_cols(lu_tensor_t *t) { return t ? t->cols : 0; }\n"
-"static void lu_tensor_print(lu_tensor_t *t) {\n"
-"    if (!t) { printf(\"<null tensor>\\n\"); return; }\n"
-"    printf(\"Tensor[%d,%d]\\n\", t->rows, t->cols);\n"
-"    for (int i = 0; i < t->rows; i++) {\n"
-"        printf(\"  [\");\n"
-"        for (int j = 0; j < t->cols; j++)\n"
-"            printf(\"%s%g\", j ? \" \" : \"\", t->data[(size_t)i * t->cols + j]);\n"
-"        printf(\"]\\n\");\n"
-"    }\n"
-"}\n"
-, cg->out);
-}
-
 fputs(
 "\n"
 "/* End of runtime — restore diagnostic state. */\n"
@@ -3721,20 +3484,6 @@ static bool ast_contains_asm(ASTNode *n) {
     if (n->kind == NODE_ASM_STMT) return true;
     for (int i = 0; i < n->children.count; i++)
         if (ast_contains_asm(n->children.items[i])) return true;
-    return false;
-}
-
-/* Используется ли тензорная библиотека: вызовы tensor_* или тип Tensor.
-   Рантайм эмитится только тогда — иначе тащим за собой зависимость от
-   libm (exp в sigmoid) в каждую программу. */
-static bool ast_uses_tensor(ASTNode *n) {
-    if (!n) return false;
-    if ((n->kind == NODE_FUNC_CALL || n->kind == NODE_IDENT) && n->sval &&
-        !strncmp(n->sval, "tensor_", 7))
-        return true;
-    if (n->type_name && !strcmp(n->type_name, "Tensor")) return true;
-    for (int i = 0; i < n->children.count; i++)
-        if (ast_uses_tensor(n->children.items[i])) return true;
     return false;
 }
 
@@ -3976,6 +3725,15 @@ void codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug) {
 
     collect_meta(&cg, root);
 
+    if (has_tensor_import(root)) {
+        size_t count;
+        const LibraryFunction *api = tensor_api(&count);
+        for (size_t i = 0; i < count; i++) {
+            cg_sym_add(&cg, api[i].name, api[i].result, false);
+            cg_sym_find(&cg, api[i].name)->is_func = true;
+        }
+    }
+
     /* ── Pre-pass: collect function/method return types (for `auto x = f()`) ── */
     collect_functions(&cg, root);
 
@@ -3987,7 +3745,7 @@ void codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug) {
        not C headers, so they must not become `#include "Russian"`. */
     for (int i = 0; i < root->children.count; i++) {
         ASTNode *n = root->children.items[i];
-        if (n->kind == NODE_IMPORT && n->sval) {
+        if ((n->kind == NODE_IMPORT || n->kind == NODE_INCLUDE) && n->sval) {
             const char *v = n->sval;
             if (v[0] == '"' || v[0] == '<')
                 emit(&cg, "#include %s\n", v);
@@ -3999,9 +3757,6 @@ void codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug) {
     for (int i = 0; root && i < root->children.count; i++)
         if (ast_contains_asm(root->children.items[i]))
             { cg.has_asm = true; break; }
-
-    /* Pre-pass: используется ли тензорная библиотека */
-    cg.need_tensor = ast_uses_tensor(root);
 
     /* Pre-pass: какие Vector<T> используются — рантайм эмитится по типам */
     cg_collect_vector_elems(&cg, root);
