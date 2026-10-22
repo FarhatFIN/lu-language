@@ -2,9 +2,13 @@
 #include "x86.h"
 #include <getopt.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <time.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <unistd.h>
 
-#define LUC_VERSION "4.1"
+#define LUC_VERSION "4.2"
 
 typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 
@@ -26,8 +30,13 @@ static void usage(const char *prog) {
         "The native backend writes a freestanding Linux x86-64 executable that\n"
         "talks to the kernel directly — no gcc, no assembler, no linker.\n"
         "GUI, X11 and tensor builtins need the C backend (-c).\n"
-        "Passing -o with a .c suffix selects the C backend.\n",
-        prog);
+        "Passing -o with a .c suffix selects the C backend.\n\n"
+        "Run mode:\n"
+        "  %s <source.lu> make\n"
+        "      Compile with the native backend, run the program in this terminal\n"
+        "      and exit with the program's own exit status. The binary is built\n"
+        "      in $TMPDIR (or /tmp) and removed afterwards unless -o is given.\n",
+        prog, prog);
 }
 
 static char *read_file(const char *path) {
@@ -60,6 +69,66 @@ static char *derive_outpath(const char *src) {
         out[len - 3] = '\0';
     strcat(out, ".c");
     return out;
+}
+
+/* ─────────────────────────────────────────────
+   "make" mode helpers
+   ───────────────────────────────────────────── */
+
+/* Pick a fresh writable path for a throw-away binary. mkstemp() is POSIX-2008
+   and stays hidden under -std=c11, so reserve the name with open(O_EXCL). */
+static bool make_temp_path(char *buf, size_t cap) {
+    const char *dir = getenv("TMPDIR");
+    if (!dir || !*dir) dir = "/tmp";
+    for (int i = 0; i < 4096; i++) {
+        int n = snprintf(buf, cap, "%s/lu-make-%ld-%d", dir, (long)getpid(), i);
+        if (n < 0 || (size_t)n >= cap) return false;
+        int fd = open(buf, O_CREAT | O_EXCL | O_WRONLY, 0755);
+        if (fd >= 0) { close(fd); return true; }
+        if (errno != EEXIST) return false;
+    }
+    return false;
+}
+
+/* Run a freshly built binary and hand its exit status back to the caller.
+   stdout/stderr/stdin are inherited, so the program prints straight into the
+   terminal. A killed program reports 128+signal, like a shell does. */
+static int run_binary(const char *path) {
+    char local[4096];
+    const char *run_path = path;
+    if (!strchr(path, '/')) {                    /* execv() needs a path */
+        snprintf(local, sizeof local, "./%s", path);
+        run_path = local;
+    }
+
+    fflush(stdout);
+    fflush(stderr);
+
+    pid_t pid = fork();
+    if (pid < 0) {
+        fprintf(stderr, "[luc] fork failed: %s\n", strerror(errno));
+        return 1;
+    }
+    if (pid == 0) {
+        execv(run_path, (char *const[]){ (char *)run_path, NULL });
+        fprintf(stderr, "[luc] cannot run '%s': %s\n", run_path, strerror(errno));
+        _exit(127);
+    }
+
+    int status = 0;
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) {
+            fprintf(stderr, "[luc] waitpid failed: %s\n", strerror(errno));
+            return 1;
+        }
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status)) {
+        fprintf(stderr, "[luc] program killed by signal %d\n", WTERMSIG(status));
+        return 128 + WTERMSIG(status);
+    }
+    return 1;
 }
 
 int main(int argc, char **argv) {
@@ -97,11 +166,37 @@ int main(int argc, char **argv) {
     }
 
     if (optind >= argc) { usage(argv[0]); return 1; }
-    if (argc - optind != 1) {
+
+    /* ./luc <source.lu> [make]
+       The optional second positional must be the literal word "make".
+       Anything else keeps the old one-source-file contract. */
+    int  npos      = argc - optind;
+    bool run_after = false;
+    if (npos == 2 && strcmp(argv[optind + 1], "make") == 0) {
+        run_after = true;
+    } else if (npos != 1) {
         fprintf(stderr, "[luc] expected exactly one source file\n");
+        fprintf(stderr, "[luc] usage: luc <source.lu> [make]\n");
         return 1;
     }
     const char *srcpath = argv[optind];
+
+    if (run_after) {
+        if (backend == BACKEND_C) {
+            fprintf(stderr,
+                "[luc] 'make' runs the native backend — it cannot be combined with -c\n");
+            return 1;
+        }
+        backend = BACKEND_NATIVE;
+        if (outfile) {
+            size_t olen = strlen(outfile);
+            if (olen > 2 && strcmp(outfile + olen - 2, ".c") == 0) {
+                fprintf(stderr,
+                    "[luc] 'make' writes an executable, not C source ('%s')\n", outfile);
+                return 1;
+            }
+        }
+    }
 
     /* ── Read source ── */
     char *src = read_file(srcpath);
@@ -155,7 +250,22 @@ int main(int argc, char **argv) {
 
     /* ── Determine output file and backend ── */
     char *auto_out = NULL;
-    if (!outfile) {
+    bool  temp_bin = false;   /* 'make' mode: throw-away binary in $TMPDIR */
+    if (run_after && !outfile) {
+        char tmpl[4096];
+        if (!make_temp_path(tmpl, sizeof tmpl)) {
+            fprintf(stderr, "[luc] cannot create a temporary file: %s\n",
+                    strerror(errno));
+            ast_free(root);
+            free(src);
+            return 1;
+        }
+        auto_out = malloc(strlen(tmpl) + 1);
+        if (!auto_out) { fputs("out of memory\n", stderr); exit(1); }
+        strcpy(auto_out, tmpl);
+        outfile  = auto_out;
+        temp_bin = true;
+    } else if (!outfile) {
         if (backend == BACKEND_C)
             auto_out = derive_outpath(srcpath);           /* foo.lu → foo.c */
         else {
@@ -202,6 +312,7 @@ int main(int argc, char **argv) {
         free(src);
         if (!ok) {
             fprintf(stderr, "[luc] native code generation failed\n");
+            if (temp_bin) unlink(outfile);
             free(auto_out);
             return 1;
         }
@@ -210,6 +321,14 @@ int main(int argc, char **argv) {
         if (stats) {
             double ms = 1000.0 * (clock() - t0) / CLOCKS_PER_SEC;
             fprintf(stderr, "[luc] native ELF written in %.1f ms\n", ms);
+        }
+        if (run_after) {
+            /* Compile → run → show the program's output, then hand back its
+               own exit status so scripts and `echo $?` stay honest. */
+            int rc = run_binary(outfile);
+            if (temp_bin) unlink(outfile);
+            free(auto_out);
+            return rc;
         }
         fprintf(stderr, "[luc] wrote '%s'  (static x86-64 ELF, no libc)\n", outfile);
         fprintf(stderr, "[luc] to run:\n      '%s'\n", outfile);

@@ -121,6 +121,37 @@ expect_failure 'Usage:' ./luc
 expect_failure "$work/missing.lu" ./luc "$work/missing.lu"
 expect_failure "$work/missing/output.c" ./luc "$work/source file.lu" -o "$work/missing/output.c"
 
+# ── make mode: compile natively, run it, return the program's exit status ──
+mkdir -p "$work/tmp"
+cat > "$work/run-me.lu" <<'EOF'
+Lu/Language
+fn main() -> int {
+    print("made it")
+    return 7
+}
+EOF
+set +e
+TMPDIR="$work/tmp" ./luc "$work/run-me.lu" make > "$work/stdout" 2> "$work/stderr"
+rc=$?
+set -e
+test "$rc" -eq 7
+test "$(cat "$work/stdout")" = "made it"
+if find "$work/tmp" -name 'lu-make-*' | grep . > /dev/null; then
+    printf '[FAIL] make mode left a temporary binary behind\n' >&2
+    exit 1
+fi
+
+# With -o the binary is kept on disk and still runs.
+set +e
+TMPDIR="$work/tmp" ./luc -o "$work/kept" "$work/run-me.lu" make > /dev/null 2>&1
+rc=$?
+set -e
+test "$rc" -eq 7
+test -x "$work/kept"
+
+expect_failure 'cannot be combined with -c' ./luc -c "$work/source file.lu" make
+expect_failure 'writes an executable, not C source' ./luc -o "$work/out.c" "$work/source file.lu" make
+
 if [ -c /dev/full ]; then
     expect_failure 'failed to write output' ./luc "$work/source file.lu" -o /dev/full
 else
