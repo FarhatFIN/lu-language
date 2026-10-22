@@ -1,0 +1,8 @@
+Lu/Strict
+
+incl <std/io>
+incl <mylib/ui>
+
+fn main() -> int {
+    ret 0
+}

@@ -1,0 +1,9 @@
+Lu/Strict
+
+fn name(a: int, b: str) -> int {
+    ret a
+}
+
+fn main() -> int {
+    ret name(0, "x")
+}

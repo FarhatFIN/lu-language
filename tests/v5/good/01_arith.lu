@@ -1,0 +1,57 @@
+Lu/Strict
+
+incl <std/io>
+
+vid LIMIT: int = 100
+
+pack byte Flags {
+    vid0..1 lit: bool = false
+    vid2..3 mode: byte = 0
+    vid4..7 code: byte = 0
+}
+
+struct Hero {
+    pub name: str
+    pub hp: int
+    secret: int
+}
+
+fn clamp(value: int, low: int, high: int) -> int {
+    if value < low {
+        ret low
+    }
+    if value > high {
+        ret high
+    }
+    ret value
+}
+
+fn main() -> int {
+    var h: Hero
+    set h.name = "Lu"
+    set h.hp = clamp(120, 0, LIMIT)
+    Pr(h.name, h.hp)
+
+    var i: int = 0
+    loop 3 {
+        set i = i + 1
+        if i == 2 {
+            continue
+        }
+        Pr(i)
+    }
+
+    vid topics: str[2] = ["Арифметика", "Переменные"]
+    for t in topics {
+        Pr(t)
+    }
+
+    if "Арифметика" in topics {
+        Pr("найдено")
+    }
+
+    var p: ptr/byte = Alloc(8)
+    Memset(p, 0, 8)
+    Del p
+    ret 0
+}

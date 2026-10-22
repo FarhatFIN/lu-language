@@ -1,0 +1,6 @@
+Lu/Strict
+
+fn main() -> int {
+    Pr("x");
+    ret 0
+}

@@ -1,0 +1,11 @@
+Lu/Strict
+
+fn main() -> int {
+    var n: int = 0
+    if dv(&n) {
+        Pr("прочитано:", n)
+    } else {
+        Pr("конец ввода")
+    }
+    ret 0
+}

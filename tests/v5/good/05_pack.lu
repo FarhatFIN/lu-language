@@ -1,0 +1,22 @@
+Lu/Strict
+
+incl <std/io>
+
+pack byte Flags {
+    vid0..1 lit: bool = false
+    vid2..3 mode: byte = 0
+    vid4..7 code: byte = 0
+}
+
+fn main() -> int {
+    var f: Flags
+    set f.lit = true
+    set f.mode = 3
+    set f.code = 9
+    if f.lit {
+        Pr("lit")
+    }
+    Pr(int(f.mode), int(f.code))
+    PrBits(int(f.mode))
+    ret 0
+}

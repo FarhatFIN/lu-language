@@ -2,7 +2,7 @@
   <img src="assets/logo.png" alt="Lu" width="180">
 </p>
 
-# luc — Lu Language Compiler v4.2
+# luc — Lu Language Compiler v4.3
 
 **Lu** — компилируемый язык программирования с **компактным синтаксисом**, **явной статической типизацией** и **низкоуровневой интеграцией с C**.
 Два бэкенда: **собственный x86-64** (по умолчанию, без gcc) и **C11** (для GUI, X11 и тензоров).
@@ -20,6 +20,59 @@ Lu/Language  →  luc -c  →  output.c  →  gcc  →  ./program
 сетевой реализацией.
 
 ---
+
+## Что нового в v4.3 — синтаксис Lu/Strict v5
+
+`luc` понимает второй, строгий синтаксис из [`SYNTAX.md`](SYNTAX.md). Файл,
+первая строка которого — `Lu/Strict`, разбирается как программа v5 и
+транслируется во внутреннее ядро v4, поэтому работают **оба бэкенда** и
+режим `make`:
+
+```bash
+./luc tests/v5/good/01_arith.lu make      # нативный ELF + запуск
+./luc tests/v5/good/01_arith.lu -o out.c  # C-бэкенд
+```
+
+```lu
+Lu/Strict
+
+incl <std/io>
+
+vid LIMIT: int = 100
+
+struct Hero {
+    pub name: str
+    pub hp: int
+    secret: int
+
+    fn alive(self) -> bool {
+        ret self.hp > 0
+    }
+}
+
+fn main() -> int {
+    var h: Hero
+    set h.name = "Lu"
+    set h.hp = 100
+    if h.alive() {
+        Pr(h.name, h.hp)
+    }
+    ret 0
+}
+```
+
+Чем v5 отличается от v4: `vid` (неизменяемая привязка) против `var`,
+единственная форма присваивания — `set`, обязательный тип в объявлении,
+`ptr/T` и `T[N]`, битовые поля через `pack byte Name { vid0..1 x: bool }`,
+`fn`/`struct`/`self`, `loop`/`for i in a..b`/`match`, `Del x` вместо
+`Free`, `Pr`/`PrBits`/`dv(&x)` вместо `print`/`scan`, `incl <std/io>`
+вместо `#include`. Ни одного `;`.
+
+Диагностика привязана к строкам исходника v5 (`path:LINE`), а не к
+промежуточному тексту. Затенение, запись в `vid`, неявное сужение
+`int -> byte` и несовпадение типов аргументов — ошибки компиляции.
+Эталонный набор из `SYNTAX.md` (12 примеров + 8 нарушений) проверяется
+командой `make test-v5`.
 
 ## Что нового в v4.2 — `luc file.lu make`
 
@@ -792,5 +845,5 @@ Lu содержит "игровой движок" из ранних версий
 
 ## Лицензия
 
-Lu Compiler v4.2 · 2026. Распространяется по [Apache License 2.0](LICENSE);
+Lu Compiler v4.3 · 2026. Распространяется по [Apache License 2.0](LICENSE);
 уведомления об авторстве — в [NOTICE](NOTICE).

@@ -1,0 +1,7 @@
+Lu/Strict
+
+fn main() -> int {
+    vid b: byte = 200
+    vid i: int = b
+    ret 0
+}

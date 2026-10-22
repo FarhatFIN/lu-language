@@ -1,0 +1,6 @@
+Lu/Strict
+
+fn main() -> int {
+    x = 5
+    ret 0
+}

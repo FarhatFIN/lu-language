@@ -1,0 +1,17 @@
+Lu/Strict
+
+incl <std/io>
+
+struct Hero {
+    pub name: str
+    pub hp: int
+    secret: int
+}
+
+fn main() -> int {
+    var h: Hero
+    set h.name = "Lu"
+    set h.hp = 7
+    Pr(h.name, h.hp)
+    ret 0
+}

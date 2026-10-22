@@ -1,0 +1,11 @@
+Lu/Strict
+
+fn main() -> int {
+    var p: ptr/byte = Alloc(64)   // 64 элемента типа, на который указывает p
+    var q: ptr/byte = Alloc(64)
+    Memset(p, 0, 64)
+    Memcpy(q, p, 64)
+    Del p                         // и p больше нельзя использовать
+    Del q
+    ret 0
+}

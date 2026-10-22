@@ -1,5 +1,5 @@
 <p align="center">
-  <img alt="version" src="https://img.shields.io/badge/version-4.1-2f81f7?style=flat-square">
+  <img alt="version" src="https://img.shields.io/badge/version-4.3-2f81f7?style=flat-square">
   <img alt="license" src="https://img.shields.io/badge/license-Apache--2.0-3fb950?style=flat-square">
   <img alt="backend" src="https://img.shields.io/badge/backend-x86--64%20%2B%20C11-8957e5?style=flat-square">
   <img alt="platform" src="https://img.shields.io/badge/platform-Linux%20x86--64-6e7681?style=flat-square">
@@ -23,6 +23,7 @@
 1. [Быстрый старт](#start)
    - [Два бэкенда](#backends)
    - [Длинные явные формы](#long)
+   - [Синтаксис Lu/Strict v5](#strict)
 2. [Модель выполнения](#model)
 3. [Лексика](#lexis)
 4. [Типы и переменные](#types)
@@ -262,6 +263,45 @@ fn main() -> int {
 
 `var p: ptr/int` — полная форма `ptr/int p`. Обе дают настоящий указатель:
 работают `Free/p`, `p[0]`, `p->field` и проверки семантики.
+
+---
+
+<a id="strict"></a>
+### Синтаксис Lu/Strict v5
+
+Если первая строка файла — `Lu/Strict`, компилятор читает его по правилам
+из [`SYNTAX.md`](SYNTAX.md): тот же низкоуровневый язык, но строже и
+короче. Транспайлер `src/v5.c` переводит программу во внутреннее ядро,
+поэтому работают оба бэкенда и режим `make`.
+
+```bash
+./luc tests/v5/good/01_arith.lu make     # собрать нативно и запустить
+./luc tests/v5/good/01_arith.lu -o x.c   # C-бэкенд
+```
+
+Правила, которых нет в v4:
+
+| v4 | v5 | Смысл |
+|---|---|---|
+| `var x: int = 0` | `vid x: int = 0` | `vid` — неизменяемая привязка |
+| `x = 1` | `set x = 1` | присваивание только через `set` |
+| `def f(a: int) -> int` | `fn f(a: int) -> int` | функции |
+| `include <io.h>` | `incl <std/io>` | подключения |
+| `print(x)` | `Pr(x)` | вывод |
+| `scan(&x)` | `dv(&x)` | ввод, возвращает `bool` |
+| `Free/p` | `Del p` | освобождение |
+| `i = i + 1` в `loop` | `for i in 0..10` | диапазонный цикл |
+| `switch` | `match x { case 1 {...} else {...} }` | выбор |
+
+`struct`-поля по умолчанию приватны, `pub` ставится перед полем. Битовые
+поля живут только внутри `pack byte Name { vid0..1 flag: bool }`. Метод —
+это `fn` внутри `struct`; `self` объявляется явно и является `ptr/Struct`,
+поэтому `set self.hp = ...` меняет объект, а не привязку.
+
+Затенение, запись в `vid`, объявление без типа и неявное сужение
+(`int -> byte`) — ошибки компиляции с номером строки исходника v5.
+Набор `tests/v5` содержит 12 положительных и 8 отрицательных программ;
+проверка — `make test-v5`.
 
 ---
 
@@ -1634,6 +1674,7 @@ int main(int argc, char **argv) {
 | `make test-all` | компилирует и запускает все `.lu` из `src/` и `tests/` |
 | `make test-cli` | CLI и ошибки файлового ввода-вывода |
 | `make test-native` | паритет бэкендов: `-n` и `-c`+cc дают одинаковые stdout и код возврата |
+| `make test-v5` | синтаксис Lu/Strict v5: 12 программ собираются, 8 отвергаются |
 | `make test-gui` | собирает X11-калькулятор без запуска |
 | `make doctor` | собирает C-раннер регрессий |
 | `make agent-test` | запускает `lu_doctor` (65 проверок) |
@@ -1850,6 +1891,11 @@ load(1)
 ## 17. Ограничения и FAQ
 
 ### Ограничения v4.1
+
+Программы `Lu/Strict` (v5) разделяют ограничения нативного бэкенда:
+6 параметров максимум, нет `float`/`asm`/шаблонов, нет проверки границ.
+Синтаксис v5 добавляет свои запреты — `;`, затенение, запись в `vid`,
+объявление без типа; полный список в `SYNTAX.md` §11.
 
 1. **Нет операторов на верхнем уровне.** Используйте `#q` или `main`.
 2. **`*p = value` не работает.** Пишите `p[0] = value`.

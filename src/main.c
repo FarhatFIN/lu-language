@@ -1,5 +1,6 @@
 #include "lu.h"
 #include "x86.h"
+#include "v5.h"
 #include <getopt.h>
 #include <sys/stat.h>
 #include <sys/wait.h>
@@ -8,7 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LUC_VERSION "4.2"
+#define LUC_VERSION "4.3"
 
 typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 
@@ -200,6 +201,21 @@ int main(int argc, char **argv) {
 
     /* ── Read source ── */
     char *src = read_file(srcpath);
+
+    /* Lu/Strict (v5) sources are lowered to plain Lu text before anything
+       else, so every backend accepts them without special cases. */
+    if (v5_is_strict(src)) {
+        char  err[512];
+        char *v4 = v5_transpile(srcpath, src, err, sizeof err);
+        if (!v4) {
+            fprintf(stderr, "%s\n", err);
+            free(src);
+            return 1;
+        }
+        free(src);
+        src = v4;
+    }
+
     clock_t t0 = clock();
     fprintf(stderr, "[luc] compiling '%s'  (O%d%s)\n",
             srcpath, opt_lvl, debug ? " debug" : "");

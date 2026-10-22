@@ -1,0 +1,26 @@
+Lu/Strict
+
+incl <std/io>
+
+struct Hero {
+    pub hp: int
+
+    fn alive(self) -> bool {
+        ret self.hp > 0
+    }
+
+    fn hit(self, dmg: int) -> int {
+        set self.hp = self.hp - dmg
+        ret self.hp
+    }
+}
+
+fn main() -> int {
+    var h: Hero
+    set h.hp = 100
+    if h.alive() {
+        Pr("alive")
+    }
+    Pr(h.hit(20))
+    ret 0
+}

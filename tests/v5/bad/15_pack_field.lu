@@ -1,0 +1,5 @@
+Lu/Strict
+
+struct Hero {
+    vid0..1 lit: bool
+}

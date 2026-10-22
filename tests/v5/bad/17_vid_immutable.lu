@@ -1,0 +1,7 @@
+Lu/Strict
+
+fn main() -> int {
+    vid x: int = 1
+    set x = 2
+    ret 0
+}

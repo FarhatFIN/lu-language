@@ -1,0 +1,16 @@
+Lu/Strict
+
+incl <std/io>
+
+pack byte Small {
+    vid0..1 lit: bool = false
+}
+
+fn main() -> int {
+    var f: Small
+    set f.lit = true
+    if f.lit {
+        Pr("включено")
+    }
+    ret 0
+}
