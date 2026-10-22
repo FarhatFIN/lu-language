@@ -1,0 +1,62 @@
+Lu/Language
+
+// Structs, arrays, pointers and the memory intrinsics.
+
+struct Point {
+    x: int
+    y: int
+}
+
+struct Buf {
+    byte data[8]
+    int n
+}
+
+fn main() -> int {
+    var pts: Point[3]
+    pts[0].x = 1
+    pts[0].y = 2
+    pts[1].x = 3
+    pts[1].y = 4
+    pts[2].x = 5
+    pts[2].y = 6
+
+    var sum: int = 0
+    var i: int = 0
+    while i < 3 {
+        sum = sum + pts[i].x + pts[i].y
+        i = i + 1
+    }
+    print(sum)
+
+    ptr/int p = &pts[1].x
+    print(p[0])
+    print(p[1])
+
+    var heap: ptr/int = Alloc/int:4
+    heap[0] = 11
+    heap[1] = 22
+    heap[2] = 33
+    heap[3] = 44
+    print(heap[0] + heap[3])
+    Free/heap
+
+    var text: byte[6]
+    Memset/text 65 5
+    text[5] = 0
+    print(text)
+
+    var copy: byte[6]
+    Memcpy/copy text 6
+    print(copy)
+
+    var b: Buf
+    b.n = 3
+    b.data[0] = 104
+    b.data[1] = 105
+    b.data[2] = 0
+    print(b.data)
+    print(b.n)
+
+    return 0
+}

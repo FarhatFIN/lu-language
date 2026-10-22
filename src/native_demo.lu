@@ -1,0 +1,72 @@
+Lu/Language
+
+// A tour of what the native backend (luc -n) covers without libc or gcc:
+// functions, recursion, globals, structs, arrays, pointers, the memory
+// intrinsics and raw syscalls. Every construct here lowers to plain
+// x86-64 machine code in a static ELF.
+//
+//   luc -n native_demo.lu -o native_demo && ./native_demo
+//
+// The same source still builds through the C backend with `luc -c`.
+
+var banner: str = "lu native backend"
+var calls: int = 0
+
+struct Pair {
+    left: int
+    right: int
+}
+
+fn fib(n: int) -> int {
+    calls = calls + 1
+    if n < 2 {
+        return n
+    }
+    return fib(n - 1) + fib(n - 2)
+}
+
+fn write_raw(text: str) -> void {
+    // write(1, text, strlen(text)) — our own strlen, not libc's.
+    syscall(1, 1, text, strlen(text))
+}
+
+fn main() -> int {
+    // Do the raw write before any buffered output so both backends show the
+    // same order (printf in the C backend flushes only at exit).
+    write_raw("raw syscall write\n")
+
+    print(banner)
+
+    var p: Pair
+    p.left = 21
+    p.right = 2
+    print(p.left * p.right)
+
+    print(fib(10))
+    print(calls)
+
+    var heap: ptr/int = Alloc/int:4
+    var i: int = 0
+    while i < 4 {
+        heap[i] = i * i
+        i = i + 1
+    }
+    print(heap[0] + heap[1] + heap[2] + heap[3])
+    Free/heap
+
+    var text: byte[6]
+    Memset/text 45 5
+    text[5] = 0
+    print(text)
+
+    var n: int = 0
+    loop 3 {
+        n = n + 1
+        if n == 2 {
+            continue
+        }
+        print(n)
+    }
+
+    return 0
+}

@@ -28,7 +28,13 @@ for level in 0 1 2 3; do
     test -s "$work/output.c"
     grep -F "(O$level)" "$work/stderr" > /dev/null
 done
-./luc "$work/source file.lu" 2> "$work/stderr"
+# No -o: default backend is native, so this must produce a runnable ELF.
+./luc "$work/source file.lu" -o "$work/prog" 2> "$work/stderr"
+test -x "$work/prog"
+test "$("$work/prog")" = 42
+
+# -c forces the C backend, which then writes <input>.c next to the input.
+./luc -c "$work/source file.lu" 2> "$work/stderr"
 test -s "$work/source file.c"
 
 cat > "$work/tensor.lu" <<'EOF'

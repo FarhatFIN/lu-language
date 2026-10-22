@@ -127,6 +127,17 @@ static const char *lu2c(const char *t) {
             return sbuf;
         }
     }
+    /* ptr/T → T* */
+    if (!strncmp(t, "ptr/", 4)) {
+        static char pbuf[8][160];
+        static int pslot;
+        char *out = pbuf[pslot];
+        pslot = (pslot + 1) & 7;
+        const char *inner = lu2c(t + 4);
+        if (!*inner || !strcmp(inner, "void")) return "void*";
+        snprintf(out, sizeof(pbuf[0]), "%s*", inner);
+        return out;
+    }
     return t;
 }
 
@@ -2051,6 +2062,16 @@ static bool top_level_skip_after_preamble(ASTNode *n) {
     }
 }
 
+/* The user's `main` is renamed to `lu_user_main` so the codegen can own the
+   real entry point. Record its declared return type: the C wrapper forwards
+   the value as the process exit code, matching the native backend. */
+static const char *cg_rename_main(Codegen *cg, ASTNode *n) {
+    cg->has_user_main = true;
+    snprintf(cg->user_main_ret, sizeof cg->user_main_ret, "%s",
+             (n->type_name && *n->type_name) ? n->type_name : "void");
+    return "lu_user_main";
+}
+
 static void gen_top_level(Codegen *cg, ASTNode *root) {
     /* Constants/config first. */
     for (int i = 0; root && i < root->children.count; i++) {
@@ -2140,7 +2161,7 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
         ASTNode *n = root->children.items[i];
         if (n->kind == NODE_FUNC_DECL || n->kind == NODE_ASYNC_FUNC) {
             const char *fname = n->sval ? n->sval : "_fn";
-            if (!strcmp(fname, "main")) { fname = "lu_user_main"; cg->has_user_main = true; }
+            if (!strcmp(fname, "main")) fname = cg_rename_main(cg, n);
             emit_function_signature(cg, n, fname, NULL);
             emit(cg, ";\n");
         } else if (node_is_class_like(n) &&
@@ -2157,7 +2178,7 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
         ASTNode *n = root->children.items[i];
         if (n->kind == NODE_FUNC_DECL || n->kind == NODE_ASYNC_FUNC) {
             const char *fname = n->sval ? n->sval : "_fn";
-            if (!strcmp(fname, "main")) { fname = "lu_user_main"; cg->has_user_main = true; }
+            if (!strcmp(fname, "main")) fname = cg_rename_main(cg, n);
             gen_function_definition_named(cg, n, fname, NULL);
         }
         else if (node_is_class_like(n) &&
@@ -2369,8 +2390,7 @@ static void gen_node(Codegen *cg, ASTNode *n) {
         /* Пользовательская main() конфликтует с сгенерированной точкой входа —
            переименовываем в lu_user_main и вызываем первой из настоящего main. */
         if (n->sval && !strcmp(n->sval, "main")) {
-            cg->has_user_main = true;
-            gen_function_definition_named(cg, n, "lu_user_main", NULL);
+            gen_function_definition_named(cg, n, cg_rename_main(cg, n), NULL);
             return;
         }
         gen_function_definition_named(cg, n, n->sval ? n->sval : "_fn", NULL);
@@ -2986,8 +3006,38 @@ static void gen_node(Codegen *cg, ASTNode *n) {
         emit(cg, ", %d);\n", n->line);
         return;
 
-    /* ── defer → cleanup-attribute variable ── */
+    /* ── asm / raw → inline assembly ── */
     case NODE_ASM_STMT: {
+        if (n->op && !strcmp(n->op, "raw")) {
+            /* raw { 0x48, 0x31, 0xc0 } → __asm__(".byte 0x48, 0x31, 0xc0").
+               Only compile-time integer literals make sense here; anything
+               else is reported by the assembler with this file's line. */
+            iemit(cg, "__asm__ (\"");
+            bool bad_range = false;
+            for (int i = 0; i < n->children.count; i++) {
+                ASTNode *e = n->children.items[i];
+                if (!e || e->kind != NODE_LITERAL_INT) { bad_range = true; break; }
+                if (e->ival < 0 || e->ival > 255) { bad_range = true; break; }
+            }
+            if (bad_range) {
+                emit(cg, ".error \\\"raw expects byte literals 0..255\\\"\"");
+                iemit(cg, ");\n");
+                return;
+            }
+            if (n->children.count == 0) {
+                emit(cg, ".byte 0x90\"");
+                iemit(cg, ");\n");
+                return;
+            }
+            emit(cg, ".byte ");
+            for (int i = 0; i < n->children.count; i++) {
+                if (i) emit(cg, ", ");
+                emit(cg, "0x%02llx", (long long)(n->children.items[i]->ival & 0xFF));
+            }
+            emit(cg, "\"");
+            iemit(cg, ");\n");
+            return;
+        }
         /* asm { ... } → __asm__ volatile("instr\n\t..."); */
         iemit(cg, "__asm__ volatile (");
         emit(cg, "\"%s\"", n->sval ? n->sval : "");
@@ -3120,6 +3170,12 @@ static void emit_runtime(Codegen *cg) {
 "#include <stdbool.h>\n"
 "#include <stdarg.h>\n"
 "#include <setjmp.h>\n"
+"/* POSIX syscall surface: `syscall(...)` in Lu lowers to the C call of the\n"
+"   same name. Declared here rather than pulling in _GNU_SOURCE so that\n"
+"   -std=c11 stays clean. */\n"
+"#include <unistd.h>\n"
+"#include <fcntl.h>\n"
+"extern long syscall(long number, ...);\n"
 "/* Lu global argc/argv */\n"
 "int   __luc_argc = 0;\n"
 "char **__luc_argv = NULL;\n"
@@ -3200,11 +3256,22 @@ static void emit_runtime(Codegen *cg) {
 "static void lu_print_float(double v)   { printf(\"%g\\n\", v); }\n"
 "static void lu_print_str(const char*v) { printf(\"%s\\n\", v ? v : \"\"); }\n"
 "static void lu_print_bool(bool v)      { printf(\"%s\\n\", v?\"true\":\"false\"); }\n"
+"/* byte buffers (ptr/byte, byte[N]) are text by convention */\n"
+"static void lu_print_bytes(const uint8_t *v) {\n"
+"    printf(\"%s\\n\", v ? (const char*)v : \"\");\n"
+"}\n"
+"/* Programs with asm/raw blocks emit globals as `static volatile T`, so a\n"
+"   string global has type `volatile char*` — a distinct type to _Generic. */\n"
+"static void lu_print_strv(volatile char *v)      { lu_print_str((const char*)v); }\n"
+"static void lu_print_bytesv(volatile uint8_t *v) { lu_print_bytes((const uint8_t*)v); }\n"
 "#define lu_print(x) _Generic((x), \\\n"
 "    int:lu_print_int, int64_t:lu_print_int,\\\n"
 "    long long:lu_print_int, double:lu_print_float,\\\n"
 "    float:lu_print_float, bool:lu_print_bool,\\\n"
-"    char*:lu_print_str, default:lu_print_int)(x)\n"
+"    char*:lu_print_str, const char*:lu_print_str,\\\n"
+"    uint8_t*:lu_print_bytes, const uint8_t*:lu_print_bytes,\\\n"
+"    volatile char*:lu_print_strv, volatile uint8_t*:lu_print_bytesv,\\\n"
+"    default:lu_print_int)(x)\n"
 "\n"
 "/* String concatenation: returns a freshly malloc'd string. */\n"
 "static char *lu_str_concat(const char *a, const char *b) {\n"
@@ -3783,7 +3850,12 @@ void codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug) {
 "    __luc_argc = argc; __luc_argv = argv;\n"
 "    /* Lu entry point: call all #q blocks in order */\n"
 );
-    if (cg.has_user_main)
+    /* `fn main() -> T` forwards T as the process exit code, the way the
+       native backend does; a void main still exits with 0. */
+    bool forward_rc = cg.has_user_main && strcmp(cg.user_main_ret, "void") != 0;
+    if (forward_rc)
+        emit(&cg, "    int _lu_rc = (int)lu_user_main();\n");
+    else if (cg.has_user_main)
         emit(&cg, "    lu_user_main();\n");
     /* call all blocks in registration order */
     if (cg.block_count > 0) {
@@ -3793,5 +3865,5 @@ void codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug) {
     } else {
         emit(&cg, "    /* no blocks defined */\n");
     }
-    emit(&cg, "    return 0;\n}\n");
+    emit(&cg, forward_rc ? "    return _lu_rc;\n}\n" : "    return 0;\n}\n");
 }

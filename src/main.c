@@ -1,15 +1,21 @@
 #include "lu.h"
+#include "x86.h"
 #include <getopt.h>
+#include <sys/stat.h>
 #include <time.h>
 
-#define LUC_VERSION "4.0"
+#define LUC_VERSION "4.1"
+
+typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 
 static void usage(const char *prog) {
     fprintf(stderr,
         "Lu Compiler  v" LUC_VERSION "\n"
         "Usage: %s [options] <source.lu>\n\n"
         "Options:\n"
-        "  -o <file>    Output C file (default: <source>.c)\n"
+        "  -n           Native backend: emit a static x86-64 ELF (default)\n"
+        "  -c           C backend: emit C source for gcc\n"
+        "  -o <file>    Output path (default: <source> for -n, <source>.c for -c)\n"
         "  -O<0-3>      Optimisation level (default: 2)\n"
         "  -d           Debug mode (emit trace info into generated code)\n"
         "  -t           Dump tokens and exit\n"
@@ -17,8 +23,10 @@ static void usage(const char *prog) {
         "  -s           Print compilation statistics\n"
         "  -v           Show version and exit\n"
         "  -h           Show this help\n\n"
-        "After compilation, build with:\n"
-        "  gcc -O<n> -std=c11 -o <program> <output.c>\n",
+        "The native backend writes a freestanding Linux x86-64 executable that\n"
+        "talks to the kernel directly — no gcc, no assembler, no linker.\n"
+        "GUI, X11 and tensor builtins need the C backend (-c).\n"
+        "Passing -o with a .c suffix selects the C backend.\n",
         prog);
 }
 
@@ -61,10 +69,13 @@ int main(int argc, char **argv) {
     bool        dump_tok  = false;
     bool        dump_ast  = false;
     bool        stats     = false;
+    Backend     backend   = BACKEND_AUTO;
 
     int c;
-    while ((c = getopt(argc, argv, "o:O:dtasvh")) != -1) {
+    while ((c = getopt(argc, argv, "nco:O:dtasvh")) != -1) {
         switch (c) {
+        case 'n': backend  = BACKEND_NATIVE; break;
+        case 'c': backend  = BACKEND_C; break;
         case 'o': outfile  = optarg; break;
         case 'O':
             if (strlen(optarg) != 1 || optarg[0] < '0' || optarg[0] > '3') {
@@ -142,30 +153,71 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* ── Semantic analysis ── */
-    SymTable syms = {0};
-    semantic_check(root, &syms);
-    if (stats && g_parse_error_count == 0)
-        fprintf(stderr, "[luc] semantic check OK (%d symbols)\n", syms.count);
-
-    /* If semantic analysis found errors (undeclared identifiers etc.),
-       the generated C won't compile — fail fast. */
-    if (g_parse_error_count > 0) {
-        fprintf(stderr, "[luc] %d error(s) during semantic analysis — aborting\n",
-                g_parse_error_count);
-        ast_free(root);
-        free(src);
-        return 1;
-    }
-
-    /* ── Determine output file ── */
+    /* ── Determine output file and backend ── */
     char *auto_out = NULL;
     if (!outfile) {
-        auto_out = derive_outpath(srcpath);
-        outfile  = auto_out;
+        if (backend == BACKEND_C)
+            auto_out = derive_outpath(srcpath);           /* foo.lu → foo.c */
+        else {
+            size_t len = strlen(srcpath);
+            auto_out = malloc(len + 1);
+            if (!auto_out) { fputs("out of memory\n", stderr); exit(1); }
+            strcpy(auto_out, srcpath);
+            if (len > 3 && !strcmp(auto_out + len - 3, ".lu"))
+                auto_out[len - 3] = '\0';
+        }
+        outfile = auto_out;
     }
 
-    /* ── Code generation ── */
+    /* An explicit -n/-c wins; otherwise a .c output path keeps the old C
+       behaviour so existing scripts and tests keep working unchanged. */
+    if (backend == BACKEND_AUTO) {
+        size_t olen = strlen(outfile);
+        backend = (olen > 2 && !strcmp(outfile + olen - 2, ".c"))
+                    ? BACKEND_C : BACKEND_NATIVE;
+    }
+
+    /* ── Semantic analysis (C backend only) ── */
+    if (backend == BACKEND_C) {
+        SymTable syms = {0};
+        semantic_check(root, &syms);
+        if (stats && g_parse_error_count == 0)
+            fprintf(stderr, "[luc] semantic check OK (%d symbols)\n", syms.count);
+
+        /* If semantic analysis found errors (undeclared identifiers etc.),
+           the generated C won't compile — fail fast. */
+        if (g_parse_error_count > 0) {
+            fprintf(stderr, "[luc] %d error(s) during semantic analysis — aborting\n",
+                    g_parse_error_count);
+            ast_free(root);
+            free(src);
+            free(auto_out);
+            return 1;
+        }
+    }
+
+    if (backend == BACKEND_NATIVE) {
+        bool ok = native_compile(root, outfile, srcpath);
+        ast_free(root);
+        free(src);
+        if (!ok) {
+            fprintf(stderr, "[luc] native code generation failed\n");
+            free(auto_out);
+            return 1;
+        }
+        if (chmod(outfile, 0755) != 0)
+            fprintf(stderr, "[luc] warning: could not mark '%s' executable\n", outfile);
+        if (stats) {
+            double ms = 1000.0 * (clock() - t0) / CLOCKS_PER_SEC;
+            fprintf(stderr, "[luc] native ELF written in %.1f ms\n", ms);
+        }
+        fprintf(stderr, "[luc] wrote '%s'  (static x86-64 ELF, no libc)\n", outfile);
+        fprintf(stderr, "[luc] to run:\n      '%s'\n", outfile);
+        free(auto_out);
+        return 0;
+    }
+
+    /* ── C code generation ── */
     FILE *out = fopen(outfile, "w");
     if (!out) {
         perror(outfile);
@@ -198,8 +250,7 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    clock_t t1 = clock();
-    double ms = 1000.0 * (t1 - t0) / CLOCKS_PER_SEC;
+    double ms = 1000.0 * (clock() - t0) / CLOCKS_PER_SEC;
 
     fprintf(stderr, "[luc] wrote '%s'  (%.1f ms)\n", outfile, ms);
     fprintf(stderr,

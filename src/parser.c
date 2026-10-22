@@ -702,6 +702,17 @@ static void parse_fn_param_types(Parser *p, char *buf, size_t cap) {
 }
 
 static char *consume_type(Parser *p) {
+    /* Pointer type: ptr/T → stores as "ptr/T". The lexer hands us the
+       `ptr/` prefix as its own token, so the pointee type is consumed
+       recursively here rather than being mistaken for the declared name. */
+    if (check(p, TOK_PTR)) {
+        consume(p); /* eat 'ptr/' */
+        char *inner = consume_type(p);
+        char buf[192];
+        snprintf(buf, sizeof(buf), "ptr/%s", inner);
+        free(inner);
+        return lu_strdup(buf);
+    }
     /* Optional type: ?T → stores as "?T" */
     if (check(p, TOK_QUESTION)) {
         consume(p); /* eat '?' */
@@ -844,16 +855,27 @@ static void parse_params(Parser *p, ASTNode *fn) {
 
         int before = p->pos;
         ASTNode *param = node_new(NODE_VAR_DECL, cur(p)->line);
-        param->type_name = consume_type(p);
-
-        /* Accept any non-separator token as the parameter name.
-           This keeps names like `exp` valid even though the lexer also has
-           TOK_EXP for the standalone game command. */
-        if (!check(p, TOK_COMMA) && !check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+        /* Two spellings are accepted: `type name` (the original) and
+           `name: type` (the long form used by `fn name(...)` and `def`).
+           The colon form is unambiguous because a type keyword is never
+           followed by ':'. */
+        if (check(p, TOK_IDENT) && peek_tok(p, 1)->type == TOK_COLON) {
             param->sval = lu_strdup(cur(p)->value ? cur(p)->value : "_param");
-            consume(p);
+            consume(p);            /* name */
+            consume(p);            /* : */
+            param->type_name = consume_type(p);
         } else {
-            param->sval = lu_strdup("_param");
+            param->type_name = consume_type(p);
+
+            /* Accept any non-separator token as the parameter name.
+               This keeps names like `exp` valid even though the lexer also has
+               TOK_EXP for the standalone game command. */
+            if (!check(p, TOK_COMMA) && !check(p, TOK_RPAREN) && !check(p, TOK_EOF)) {
+                param->sval = lu_strdup(cur(p)->value ? cur(p)->value : "_param");
+                consume(p);
+            } else {
+                param->sval = lu_strdup("_param");
+            }
         }
 
         node_list_add(&fn->children, param);
@@ -1357,9 +1379,19 @@ static ASTNode *parse_struct(Parser *p) {
         }
 
         ASTNode *field = node_new(NODE_VAR_DECL, cur(p)->line);
-        field->type_name = consume_type(p);
-        if (is_type_tok(cur(p)->type) || check(p, TOK_IDENT)) {
-            field->sval = lu_strdup(cur(p)->value); consume(p);
+        /* Two accepted field shapes:
+             int x        — type first (classic Lu)
+             x: int       — name first (long form, mirrors `var x: int`) */
+        if (check(p, TOK_IDENT) && peek_tok(p, 1)->type == TOK_COLON) {
+            field->sval = lu_strdup(cur(p)->value);
+            consume(p);
+            match(p, TOK_COLON);
+            field->type_name = consume_type(p);
+        } else {
+            field->type_name = consume_type(p);
+            if (is_type_tok(cur(p)->type) || check(p, TOK_IDENT)) {
+                field->sval = lu_strdup(cur(p)->value); consume(p);
+            }
         }
         /* optional [size] for array fields — supports multi-dimensional */
         int fndims = 0;
@@ -1447,8 +1479,34 @@ static const char *compound_op(TokenType t) {
     }
 }
 
+/* Re-parse a slice of the token stream as a single expression. Used to
+   turn an assignment target ("a[i].f") into a structural AST node so a
+   backend can compute its address instead of re-parsing text. */
+static ASTNode *build_lvalue_from_tokens(Parser *p, int start, int end) {
+    int n = end - start;
+    if (n <= 0) return NULL;
+    if (n > 4096) return NULL;
+    Token *buf = (Token *)calloc((size_t)n + 1, sizeof(Token));
+    if (!buf) return NULL;
+    memcpy(buf, p->tokens + start, (size_t)n * sizeof(Token));
+    buf[n].type  = TOK_EOF;
+    buf[n].value = NULL;
+    buf[n].line  = buf[n - 1].line;
+    buf[n].col   = 0;
+
+    Parser sub;
+    sub.tokens = buf;
+    sub.count  = n + 1;
+    sub.pos    = 0;
+
+    ASTNode *e = parse_expr(&sub);
+    free(buf);
+    return e;
+}
+
 static ASTNode *parse_assignment_stmt(Parser *p) {
     int line = cur(p)->line;
+    int lval_start = p->pos;
     ASTNode *n = node_new(NODE_SET, line);
     n->sval = lu_strdup(cur(p)->value ? cur(p)->value : "_var");
     consume(p);
@@ -1485,6 +1543,11 @@ static ASTNode *parse_assignment_stmt(Parser *p) {
         n->sval = lu_strdup(buf);
     }
 
+    /* Build a structural left-hand side over the token range we just
+       walked. Used by the native backend; the text in sval stays for
+       the C backend. */
+    n->lhs = build_lvalue_from_tokens(p, lval_start, p->pos);
+
     /* Match the assignment operator (plain or compound). */
     TokenType at = cur(p)->type;
     const char *cop = compound_op(at);
@@ -1499,6 +1562,84 @@ static ASTNode *parse_assignment_stmt(Parser *p) {
         n->op = lu_strdup(cop);
     }
     node_list_add(&n->children, rhs);
+    return n;
+}
+
+/* Long-form declaration: `var name: type = expr` / `let name: type = expr`.
+   The name comes first and the type follows it, which reads better once
+   types get long (`ptr/byte`, `fn(int)->int`). The type may be omitted and
+   defaults to `auto`. Produces the same NODE_VAR_DECL as the compact
+   `type name = expr` form, so both backends handle it without changes. */
+static ASTNode *parse_let_decl(Parser *p) {
+    int line = cur(p)->line;
+    Token *kw = cur(p);
+    consume(p); /* eat 'var' / 'let' */
+    ASTNode *n = node_new(NODE_VAR_DECL, line);
+
+    if (check(p, TOK_IDENT)) {
+        n->sval = lu_strdup(cur(p)->value);
+        consume(p);
+    } else {
+        lu_error(line, "'%s' needs a variable name", kw->value ? kw->value : "var");
+        g_parse_error_count++;
+        n->sval = lu_strdup("_var");
+    }
+
+    if (match(p, TOK_COLON)) {
+        n->type_name = consume_type(p);
+    } else {
+        n->type_name = lu_strdup("auto");
+    }
+
+    /* Array dimensions come after the type in this form: byte[16]. */
+    int ndims = 0;
+    while (match(p, TOK_LBRACKET)) {
+        if (ndims == 0) n->op = lu_strdup("array");
+        node_list_add(&n->children, parse_expr(p));
+        match(p, TOK_RBRACKET);
+        ndims++;
+    }
+    n->ival = ndims;
+
+    /* `var p: ptr/T` is the long form of `ptr/T p`. Both become a pointer
+       declaration so that `Free/`, `->` and semantic pointer checks agree.
+       An array of pointers keeps the ordinary array declaration path. */
+    if (ndims == 0 && n->type_name && !strncmp(n->type_name, "ptr/", 4)) {
+        char *pointee = lu_strdup(n->type_name + 4);
+        free(n->type_name);
+        n->type_name = pointee;
+        n->kind = NODE_PTR_DECL;
+    }
+
+    if (match(p, TOK_ASSIGN)) {
+        if (ndims > 0 && match(p, TOK_LBRACE)) {
+            /* Same flat/nested brace initialiser as the compact form. */
+            while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                skip_newlines(p);
+                if (check(p, TOK_RBRACE) || check(p, TOK_EOF)) break;
+                if (check(p, TOK_LBRACE)) {
+                    ASTNode *sub = node_new(NODE_EXPR_INDEX, cur(p)->line);
+                    sub->op = lu_strdup("list");
+                    consume(p);
+                    while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                        skip_newlines(p);
+                        if (check(p, TOK_RBRACE) || check(p, TOK_EOF)) break;
+                        node_list_add(&sub->children, parse_expr(p));
+                        match(p, TOK_COMMA);
+                    }
+                    match(p, TOK_RBRACE);
+                    node_list_add(&n->children, sub);
+                } else {
+                    node_list_add(&n->children, parse_expr(p));
+                }
+                match(p, TOK_COMMA);
+            }
+            skip_newlines(p);
+            match(p, TOK_RBRACE);
+        } else {
+            node_list_add(&n->children, parse_expr(p));
+        }
+    }
     return n;
 }
 
@@ -1692,6 +1833,7 @@ static ASTNode *parse_statement(Parser *p) {
     }
     case TOK_SET: {
         consume(p);
+        int lval_start = p->pos;
         ASTNode *n = node_new(NODE_SET, line);
         n->sval = lu_strdup(cur(p)->value); consume(p); /* var */
         /* optional field chain */
@@ -1724,6 +1866,8 @@ static ASTNode *parse_statement(Parser *p) {
             char buf[768]; snprintf(buf, sizeof(buf), "%s%s", old ? old : "", extra);
             free(old); n->sval = lu_strdup(buf);
         }
+        n->lhs = build_lvalue_from_tokens(p, lval_start, p->pos);
+
         /* Match assignment operator (plain or compound). */
         TokenType at = cur(p)->type;
         const char *cop = compound_op(at);
@@ -2121,6 +2265,37 @@ static ASTNode *parse_statement(Parser *p) {
         if (!strcmp(v, "fn") && peek_tok(p, 1)->type == TOK_LPAREN) {
             return parse_var_decl(p);
         }
+        /* fn name(params) -> ret { } — long form of Fn/name(...):ret { }.
+           `fn(` above is the function-pointer type; `fn` followed by a
+           name can only be a declaration. */
+        if (!strcmp(v, "fn") && peek_tok(p, 1)->type == TOK_IDENT) {
+            return parse_def_func(p);
+        }
+        /* var name: type = expr / let name: type = expr — the long-form
+           declaration. Require an identifier next so existing code that
+           uses `var` or `let` as a plain variable name keeps working. */
+        if ((!strcmp(v, "var") || !strcmp(v, "let")) &&
+            peek_tok(p, 1)->type == TOK_IDENT) {
+            return parse_let_decl(p);
+        }
+        /* raw { 0x48, 0x31, ... } — literal machine-code bytes for the
+           native backend, where `asm { }` text cannot be assembled. */
+        if (!strcmp(v, "raw") && peek_tok(p, 1)->type == TOK_LBRACE) {
+            consume(p);
+            ASTNode *rn = node_new(NODE_ASM_STMT, line);
+            rn->op = lu_strdup("raw");
+            skip_newlines(p);
+            match(p, TOK_LBRACE);
+            while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                skip_newlines(p);
+                if (check(p, TOK_RBRACE)) break;
+                ASTNode *e = parse_expr(p);
+                if (e) node_list_add(&rn->children, e);
+                match(p, TOK_COMMA);
+            }
+            match(p, TOK_RBRACE);
+            return rn;
+        }
 
         /* ── Python-style keywords (hybrid mode: both styles work) ── */
 
@@ -2277,6 +2452,33 @@ static ASTNode *parse_statement(Parser *p) {
             if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "in")) consume(p);
             node_list_add(&n->children, parse_expr(p));
             /* body */
+            skip_newlines(p);
+            if (match(p, TOK_LBRACE)) {
+                ASTNode *body = node_new(NODE_PROGRAM, line);
+                skip_newlines(p);
+                while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
+                    skip_newlines(p);
+                    if (check(p, TOK_RBRACE)) break;
+                    int pos_before = p->pos;
+                    ASTNode *s = parse_statement(p);
+                    if (s) node_list_add(&body->children, s);
+                    opt_newline(p);
+                    if (p->pos == pos_before) consume(p);
+                }
+                match(p, TOK_RBRACE);
+                node_list_add(&n->children, body);
+            }
+            return n;
+        }
+
+        /* loop <count> { ... } — long form of Loop/<count> { ... }.
+           `loop` is only a keyword here when it is not being assigned to,
+           so existing code that uses it as a variable name still parses. */
+        if (!strcmp(v, "loop") && peek_tok(p, 1)->type != TOK_ASSIGN &&
+            peek_tok(p, 1)->type != TOK_COLON) {
+            consume(p);
+            ASTNode *n = node_new(NODE_LOOP, line);
+            node_list_add(&n->children, parse_expr(p));
             skip_newlines(p);
             if (match(p, TOK_LBRACE)) {
                 ASTNode *body = node_new(NODE_PROGRAM, line);

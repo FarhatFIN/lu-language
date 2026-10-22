@@ -1,0 +1,25 @@
+Lu/Language
+
+// Raw syscalls and process exit: the native backend has no libc, so these go
+// straight to the kernel; the C backend lowers them to libc equivalents.
+
+fn shout(text: str) -> void {
+    print(text)
+}
+
+fn main() -> int {
+    var buf: byte[4]
+    buf[0] = 104
+    buf[1] = 105
+    buf[2] = 10
+    buf[3] = 0
+    syscall(1, 1, &buf[0], 3)
+
+    shout("done")
+
+    // The exit status is what the caller observes, so the test harness
+    // compares it between the two backends.
+    exit(7)
+    print("unreachable")
+    return 0
+}

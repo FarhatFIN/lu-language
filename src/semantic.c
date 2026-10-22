@@ -28,6 +28,14 @@ static Symbol *sym_find(SymTable *st, const char *name) {
     return NULL;
 }
 
+/* Names the language itself provides. The native backend implements them as
+   builtins; the C backend maps them onto libc, so a call to either must not
+   be reported as an undeclared function. */
+static bool is_backend_builtin(const char *name) {
+    return !strcmp(name, "syscall") || !strcmp(name, "exit") ||
+           !strcmp(name, "strlen");
+}
+
 /* Find in same scope only (for duplicate detection) */
 static Symbol *sym_find_in_scope(SymTable *st, const char *name, int scope) {
     for (int i = 0; i < st->count; i++)
@@ -534,7 +542,7 @@ static void check_node(ASTNode *node, SymTable *st, BlockRegistry *br, int scope
             } else if (strncmp(node->sval, "lu_", 3)  != 0 &&
                        strncmp(node->sval, "__lu_", 5) != 0 &&
                        strncmp(node->sval, "_q", 2)    != 0) {
-                if (!sym_find(st, node->sval)) {
+                if (!is_backend_builtin(node->sval) && !sym_find(st, node->sval)) {
                     lu_warn(node->line, "call to undeclared function '%s'", node->sval);
                     /* C headers (Import "<...>") bring arbitrary functions the
                        compiler cannot see — unresolved calls stay a soft warning

@@ -333,6 +333,7 @@ struct ASTNode {
     char     *type_name;  /* for typed declarations  */
     char     *op;         /* operator symbol          */
     char     *annot;      /* annotation name / f-string part kind: "lit" or "expr" */
+    struct ASTNode *lhs;  /* structural left-hand side for NODE_SET */
 };
 
 /* ─────────────────────────────────────────────
@@ -426,6 +427,8 @@ typedef struct {
     ASTNode *current_class;
     /* user defined def main() — renamed to lu_user_main */
     bool has_user_main;
+    /* return type of that main, so the C wrapper can forward the exit code */
+    char user_main_ret[32];
     /* программа содержит asm-блоки → глобали эмитятся volatile */
     bool has_asm;
     /* типы элементов Vector<T>, реально использованные в программе —

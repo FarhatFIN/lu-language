@@ -61,6 +61,7 @@ void ast_free(ASTNode *node) {
     free(node->type_name);
     free(node->op);
     free(node->annot);
+    ast_free(node->lhs);
     free(node);
 }
 

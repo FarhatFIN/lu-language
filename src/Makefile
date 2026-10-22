@@ -6,10 +6,10 @@ CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic \
 	  -Wno-overlength-strings \
 	  -g -O2
 TARGET  = luc
-SRCS    = main.c lexer.c parser.c semantic.c codegen.c libraries.c util.c
+SRCS    = main.c lexer.c parser.c semantic.c codegen.c libraries.c util.c x86.c
 OBJS    = $(SRCS:.c=.o)
 
-.PHONY: all clean test test-all test-cli test-gui bootstrap doctor agent-test fuzz
+.PHONY: all clean test test-all test-cli test-native test-gui bootstrap doctor agent-test fuzz
 
 all: $(TARGET)
 
@@ -30,7 +30,7 @@ test: $(TARGET) example.lu
 # Full regression pass over bundled Lu programs.
 # calculator_gui.lu is excluded: it needs an X11 display and blocks
 # waiting for events — build it with `make test-gui` instead.
-test-all: $(TARGET) test-cli
+test-all: $(TARGET) test-cli test-native
 	@rm -rf .lu_test_build
 	@mkdir -p .lu_test_build
 	@set -e; \
@@ -47,6 +47,11 @@ test-all: $(TARGET) test-cli
 # CLI validation and file I/O error regressions.
 test-cli: $(TARGET)
 	sh ../tests/cli_test.sh
+
+# Native backend parity: each tests/native program must produce the same
+# stdout and exit status through `luc -n` and through `luc -c` + cc.
+test-native: $(TARGET)
+	sh ../tests/native_test.sh
 
 # GUI demo: compile + link the X11 calculator (no run — needs a display).
 test-gui: $(TARGET) calculator_gui.lu

@@ -1,0 +1,79 @@
+Lu/Language
+
+// Loops for the native backend: for-each, nested loops, break and continue.
+// `continue` must still advance the counter in `loop N` and `for x in arr`.
+
+fn main() -> int {
+    var arr: int[6]
+    arr[0] = 1
+    arr[1] = 2
+    arr[2] = 3
+    arr[3] = 4
+    arr[4] = 5
+    arr[5] = 6
+
+    var sum: int = 0
+    for x in arr {
+        if x == 2 {
+            continue
+        }
+        if x == 6 {
+            break
+        }
+        sum = sum + x
+    }
+    print(sum)
+
+    var i: int = 0
+    var hits: int = 0
+    while i < 6 {
+        i = i + 1
+        var j: int = 0
+        while j < 3 {
+            j = j + 1
+            if j == 2 {
+                continue
+            }
+            hits = hits + 1
+        }
+        if i == 3 {
+            continue
+        }
+        hits = hits + 10
+    }
+    print(hits)
+
+    var total: int = 0
+    for a in arr {
+        var k: int = 0
+        loop 2 {
+            k = k + 1
+            if k == 2 {
+                continue
+            }
+            total = total + a
+        }
+    }
+    print(total)
+
+    var n: int = 0
+    loop 3 {
+        n = n + 1
+        if n == 2 {
+            continue
+        }
+        print(n)
+    }
+    print(n)
+
+    var m: int = 0
+    loop 5 {
+        m = m + 1
+        if m == 3 {
+            break
+        }
+    }
+    print(m)
+
+    return 0
+}
