@@ -6,10 +6,10 @@ CFLAGS  = -std=c11 -Wall -Wextra -Wpedantic \
 	  -Wno-overlength-strings \
 	  -g -O2
 TARGET  = luc
-SRCS    = main.c lexer.c parser.c semantic.c codegen.c libraries.c util.c x86.c v5.c
+SRCS    = main.c lexer.c parser.c semantic.c codegen.c libraries.c util.c x86.c v5.c includes.c
 OBJS    = $(SRCS:.c=.o)
 
-.PHONY: all clean test test-all test-cli test-native test-v5 test-gui bootstrap doctor agent-test fuzz
+.PHONY: all clean test test-all test-cli test-native test-v5 test-gui test-motion bootstrap doctor agent-test fuzz
 
 all: $(TARGET)
 
@@ -63,6 +63,11 @@ test-gui: $(TARGET) calculator_gui.lu
 	./$(TARGET) calculator_gui.lu -o .lu_test_build/calculator_gui.c
 	$(CC) -O2 -std=c11 -o .lu_test_build/calculator_gui .lu_test_build/calculator_gui.c -lX11
 	@echo "[LU TEST] calculator_gui compiled and linked (run: .lu_test_build/calculator_gui)"
+
+# The bundled LuMotion application: builds both binaries and renders frames.
+# Needs libX11 at link time; the renderer checks themselves are headless.
+test-motion: $(TARGET)
+	sh ../motion/test.sh
 
 # C-only local agents: syntax, C backend and runtime regression checks.
 doctor: $(TARGET) lu_doctor.c

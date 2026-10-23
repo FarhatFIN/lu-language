@@ -477,6 +477,10 @@ void check_library_usage(ASTNode *root);
 /* codegen.c */
 void  codegen_run(ASTNode *root, FILE *out, int opt_level, bool debug);
 
+/* includes.c — `incl <...>` expansion for the v4 front end */
+char  *lu_expand_includes(const char *path, const char *src,
+                          char *err, size_t errsz);
+
 /* util.c */
 char  *lu_strdup(const char *s);
 void   node_list_add(NodeList *l, ASTNode *n);

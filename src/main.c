@@ -9,7 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LUC_VERSION "4.5"
+#define LUC_VERSION "4.6"
 
 typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 
@@ -214,6 +214,18 @@ int main(int argc, char **argv) {
         }
         free(src);
         src = v4;
+    } else {
+        /* v4: splice `incl <...>` units before lexing.  v5 does this during
+           its own parse, so it must not run twice. */
+        char  err[1024];
+        char *exp = lu_expand_includes(srcpath, src, err, sizeof err);
+        if (!exp) {
+            fprintf(stderr, "%s\n", err);
+            free(src);
+            return 1;
+        }
+        free(src);
+        src = exp;
     }
 
     clock_t t0 = clock();

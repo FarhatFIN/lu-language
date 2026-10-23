@@ -1127,6 +1127,22 @@ int main(void) {
             "  print(\"done\")\n"
             "}\n",
             "1 2.5 three true\n\ndone\n"
+        },
+        /* v4.6: `else if` must nest inside `else`, not become a second `if`
+           with its own else — the old parse ran the final branch whenever the
+           first was true and the second was false. */
+        {
+            "else_if_chain",
+            "Lu/Language\n"
+            "def classify(int n) -> void {\n"
+            "  if n > 10 { print(\"big\") } else if n > 5 { print(\"mid\") } else { print(\"small\") }\n"
+            "}\n"
+            "def main() -> void {\n"
+            "  classify(20)\n"
+            "  classify(7)\n"
+            "  classify(1)\n"
+            "}\n",
+            "big\nmid\nsmall\n"
         }
     };
     int total = (int)(sizeof(cases) / sizeof(cases[0]));

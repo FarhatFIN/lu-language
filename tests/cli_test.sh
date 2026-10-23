@@ -165,6 +165,74 @@ expect_failure "'tensor_zeros' expects 2 argument(s), got 1" \
 
 expect_failure 'tensor.h needs the C backend' ./luc "$work/tensor-v5.lu" -o "$work/tensor-v5"
 
+# ── v4 `incl`: source splice, include-once, C header passthrough ──
+mkdir -p "$work/lib"
+cat > "$work/lib/util.lu" <<'EOF'
+Lu/Language
+
+def twice(int x) -> int {
+    return x * 2
+}
+EOF
+cat > "$work/app.lu" <<'EOF'
+Lu/Language
+incl <lib/util.lu>
+incl <./lib/util.lu>
+incl <lib/../lib/util.lu>
+incl <stdio.h>
+def main() -> void {
+    print(twice(21))
+}
+EOF
+./luc "$work/app.lu" -o "$work/app.c" 2> "$work/stderr"
+grep -F '#include <stdio.h>' "$work/app.c" > /dev/null
+cc -std=c11 "$work/app.c" -o "$work/app"
+test "$("$work/app")" = 42
+
+# A cycle must terminate, and each file must still be spliced only once.
+cat > "$work/lib/a.lu" <<'EOF'
+Lu/Language
+incl <b.lu>
+def fa() -> void { print("a") }
+EOF
+cat > "$work/lib/b.lu" <<'EOF'
+Lu/Language
+incl <a.lu>
+def fb() -> void { print("b") }
+EOF
+cat > "$work/cycle.lu" <<'EOF'
+Lu/Language
+incl <lib/a.lu>
+def main() -> void {
+    fa()
+    fb()
+}
+EOF
+./luc "$work/cycle.lu" -o "$work/cycle.c" 2> "$work/stderr"
+cc -std=c11 "$work/cycle.c" -o "$work/cycle"
+test "$("$work/cycle" | tr '\n' ' ')" = "a b "
+
+cat > "$work/missing-include.lu" <<'EOF'
+Lu/Language
+incl <nope.lu>
+def main() -> void { }
+EOF
+expect_failure 'incl <nope.lu> — file not found' \
+    ./luc "$work/missing-include.lu" -o "$work/rejected.c"
+
+cat > "$work/lib/strict.lu" <<'EOF'
+Lu/Strict
+
+fn helper() -> int { ret 1 }
+EOF
+cat > "$work/includes-strict.lu" <<'EOF'
+Lu/Language
+incl <lib/strict.lu>
+def main() -> void { }
+EOF
+expect_failure 'v4 units can only include Lu/Language files' \
+    ./luc "$work/includes-strict.lu" -o "$work/rejected.c"
+
 cat > "$work/tensor-shape.lu" <<'EOF'
 Lu/Language
 #include <tensor.h>

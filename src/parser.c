@@ -2327,6 +2327,15 @@ static ASTNode *parse_statement(Parser *p) {
             } else if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "else")) {
                 consume(p);
                 skip_newlines(p);
+                /* `else if …` chains: attach the nested NODE_IF directly (not
+                   wrapped in a block) so codegen can emit `else if (…)` and the
+                   condition is skipped when the first branch was taken. */
+                if (check(p, TOK_IDENT) && (!strcmp(cur(p)->value, "if") ||
+                                            !strcmp(cur(p)->value, "elif"))) {
+                    ASTNode *alt = parse_statement(p);
+                    if (alt) node_list_add(&n->children, alt);
+                    return n;
+                }
                 ASTNode *else_body = node_new(NODE_PROGRAM, line);
                 if (match(p, TOK_LBRACE)) {
                     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -2638,6 +2647,15 @@ static ASTNode *parse_statement(Parser *p) {
             } else if (check(p, TOK_IDENT) && !strcmp(cur(p)->value, "else")) {
                 consume(p);
                 skip_newlines(p);
+                /* `else if …` chains: attach the nested NODE_IF directly (not
+                   wrapped in a block) so codegen can emit `else if (…)` and the
+                   condition is skipped when the first branch was taken. */
+                if (check(p, TOK_IDENT) && (!strcmp(cur(p)->value, "if") ||
+                                            !strcmp(cur(p)->value, "elif"))) {
+                    ASTNode *alt = parse_statement(p);
+                    if (alt) node_list_add(&n->children, alt);
+                    return n;
+                }
                 ASTNode *else_body = node_new(NODE_PROGRAM, line);
                 if (match(p, TOK_LBRACE)) {
                     while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
@@ -2660,6 +2678,13 @@ static ASTNode *parse_statement(Parser *p) {
         if (!strcmp(v, "else")) {
             consume(p);
             skip_newlines(p);
+            /* A bare `else if …` (an if whose own else was consumed elsewhere)
+               is still an else-branch, not an unrelated statement. */
+            if (check(p, TOK_IDENT) && (!strcmp(cur(p)->value, "if") ||
+                                        !strcmp(cur(p)->value, "elif"))) {
+                ASTNode *alt = parse_statement(p);
+                if (alt) return alt;
+            }
             ASTNode *else_body = node_new(NODE_PROGRAM, line);
             if (match(p, TOK_LBRACE)) {
                 while (!check(p, TOK_RBRACE) && !check(p, TOK_EOF)) {
