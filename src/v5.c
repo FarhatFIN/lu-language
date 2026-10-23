@@ -21,6 +21,7 @@
 #define _POSIX_C_SOURCE 200809L
 
 #include "v5.h"
+#include "lu.h"
 
 #include <ctype.h>
 #include <stdarg.h>
@@ -172,7 +173,10 @@ static int type_size(Type *t)
     case TY_STR:  return 8;
     case TY_PTR:  return 8;
     case TY_ARR:  return type_size(t->base) * t->count;
-    default:      return 4;
+    default:
+        /* `float` is the C library's double: the tensor API returns it and
+           the v4 layer maps it to double, so size it as 8 bytes. */
+        return (t->name && !strcmp(t->name, "float")) ? 8 : 4;
     }
 }
 
@@ -236,6 +240,7 @@ typedef struct {
 
     bool scan;
     bool failed;
+    bool tensor_lib;            /* `incl <tensor.h>` was seen */
     char err[512];
 
     Var *glob; int nglob, cglob;
@@ -717,6 +722,15 @@ static Type *parse_type_atom(V5 *v)
     if (!strcmp(t->text, "bool"))  return &ty_bool;
     if (!strcmp(t->text, "str"))   return &ty_str;
     if (!strcmp(t->text, "void"))  return &ty_void;
+    if (v->tensor_lib && !strcmp(t->text, "Tensor"))
+        return mk_type(TY_NAMED, "Tensor", NULL, 0);
+    /* `float` is the C double that tensor_get/sum and friends return. */
+    if (v->tensor_lib && !strcmp(t->text, "float"))
+        return mk_type(TY_NAMED, "float", NULL, 0);
+    if (!strcmp(t->text, "Tensor")) {
+        verr(v, t->line, "type 'Tensor' needs `incl <tensor.h>`");
+        return &ty_int;
+    }
     if (find_struct(v, t->text) || find_pack(v, t->text))
         return mk_type(TY_NAMED, t->text, NULL, 0);
     verr(v, t->line, "unknown type '%s'", t->text);
@@ -987,6 +1001,51 @@ static Type *primary(V5 *v, Buf *b)
             }
             expect_p(v, ")");
             buf_putc(b, ')');
+            return &ty_int;
+        }
+
+        /* tensor.h is a C library. v5 knows its signatures from the same
+           table the v4 pipeline uses, so return types and arity are checked
+           here and the calls reach the C backend unchanged. */
+        if (!strncmp(s, "tensor_", 7) &&
+            peek(v, 1)->kind == TK_PUNCT && !strcmp(peek(v, 1)->text, "(")) {
+            const LibraryFunction *fn = v->tensor_lib ? tensor_function(s) : NULL;
+            int n = 0;
+            if (!v->tensor_lib) {
+                verr(v, tk->line, "'%s' needs `incl <tensor.h>`", s);
+                return &ty_int;
+            }
+            if (!fn) {
+                verr(v, tk->line, "unknown tensor function '%s'", s);
+                return &ty_int;
+            }
+            adv(v);
+            buf_puts(b, s);
+            buf_putc(b, '(');
+            expect_p(v, "(");
+            while (!v->failed && !at_p(v, ")")) {
+                Buf arg;
+                memset(&arg, 0, sizeof arg);
+                expr(v, &arg);
+                if (n) buf_puts(b, ", ");
+                buf_add(b, arg.s ? arg.s : "", arg.len);
+                free(arg.s);
+                n++;
+                if (at_p(v, ",")) { adv(v); continue; }
+                break;
+            }
+            expect_p(v, ")");
+            buf_putc(b, ')');
+            if (n != fn->arity) {
+                verr(v, tk->line, "'%s' expects %d argument(s), got %d",
+                     fn->name, fn->arity, n);
+                return &ty_int;
+            }
+            if (!strcmp(fn->result, "Tensor"))
+                return mk_type(TY_NAMED, "Tensor", NULL, 0);
+            if (!strcmp(fn->result, "float"))
+                return mk_type(TY_NAMED, "float", NULL, 0);
+            if (!strcmp(fn->result, "void")) return &ty_void;
             return &ty_int;
         }
 
@@ -2512,6 +2571,21 @@ static void parse_include(V5 *v)
 
     /* the std/ namespace is provided by the compiler itself */
     if (!strncmp(path.s ? path.s : "", "std/", 4)) { free(path.s); return; }
+
+    /* C headers are not Lu source: pass the directive through to the v4 text
+       instead of splicing the header into the token stream. */
+    if (!strcmp(path.s ? path.s : "", "tensor.h")) {
+        v->tensor_lib = true;
+        if (!v->scan) {
+            Buf directive;
+            memset(&directive, 0, sizeof directive);
+            buf_puts(&directive, "#include <tensor.h>");
+            emit_line(v, line, &directive);
+            free(directive.s);
+        }
+        free(path.s);
+        return;
+    }
 
     /* pass 1 pulls the file in once; pass 2 walks the tokens already spliced
        into the stream, so the directive itself only needs to be skipped. */

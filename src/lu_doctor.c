@@ -942,11 +942,22 @@ int main(void) {
             "  print(tensor_get(s, 0, 0))\n"
             "  print(tensor_sum(s))\n"
             "  print(tensor_rows(s))\n"
+            "  Tensor c = tensor_copy(s)\n"
+            "  print(tensor_max(c))\n"
+            "  print(tensor_min(c))\n"
+            "  print(tensor_argmax(c))\n"
+            "  print(tensor_dot(c, c))\n"
+            "  print(tensor_sum(tensor_abs(tensor_full(1, 2, -3))))\n"
+            "  Tensor v = tensor_full(2, 1, 3)\n"
+            "  print(tensor_sum(tensor_matvec(s, v)))\n"
+            "  print(tensor_sum(tensor_clip(tensor_full(1, 2, 5), 0, 4)))\n"
+            "  tensor_free(v)\n"
+            "  tensor_free(c)\n"
             "  tensor_free(s)\n"
             "  tensor_free(a)\n"
             "  tensor_free(e)\n"
             "}\n",
-            "2\n5\n2\n"
+            "2\n5\n2\n3\n0\n3\n13\n6\n15\n8\n"
         },
         /* v3.3 iteration: Python-style def methods in class bodies */
         {

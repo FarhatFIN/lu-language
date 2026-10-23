@@ -9,7 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LUC_VERSION "4.4"
+#define LUC_VERSION "4.5"
 
 typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 
@@ -320,6 +320,20 @@ int main(int argc, char **argv) {
             free(auto_out);
             return 1;
         }
+    }
+
+    /* tensor.h is a C header with doubles and libm; the native backend has
+       neither and its generic "unknown type 'Tensor'" does not say how to
+       build the file. */
+    if (backend == BACKEND_NATIVE && has_tensor_import(root)) {
+        fprintf(stderr,
+                "[luc] tensor.h needs the C backend:\n"
+                "      luc %s -c -o out.c\n"
+                "      cc -std=c11 -Iinclude out.c -lm -o program\n", srcpath);
+        ast_free(root);
+        free(src);
+        free(auto_out);
+        return 1;
     }
 
     if (backend == BACKEND_NATIVE) {

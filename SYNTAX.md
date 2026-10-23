@@ -414,6 +414,7 @@ fn main() -> int {
 incl <std/io>
 incl <Uios>
 incl <mylib/ui>
+incl <tensor.h>
 ```
 
 - Один `incl` — один файл. Путь через `/`, без кавычек и без `.lu`:
@@ -429,6 +430,27 @@ incl <mylib/ui>
   стоит `incl`.
 - `incl <std/io>` (всё пространство `std/`) — встроенный no-op: `Pr`,
   `PrBits` и `dv` доступны и без него.
+- `incl <tensor.h>` — единственное исключение из правил выше: это C-заголовок,
+  а не `.lu`-файл. Он не вставляется в поток токенов, а превращается в
+  `#include <tensor.h>` в сгенерированном C; одновременно компилятор узнаёт
+  тип `Tensor` и сигнатуры `tensor_*` (арность и тип результата проверяются).
+  Поэтому программы с тензорами собираются только C-бэкендом (`luc file.lu -c`),
+  а float-литералов в v5 нет — скаляры передаются целыми.
+
+```lu
+Lu/Strict
+
+incl <tensor.h>
+
+fn main() -> int {
+    var a: Tensor = tensor_full(2, 2, 3)
+    var t: Tensor = tensor_transpose(a)
+    tensor_print(t)
+    tensor_free(t)
+    tensor_free(a)
+    ret 0
+}
+```
 
 ---
 

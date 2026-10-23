@@ -375,21 +375,33 @@ print(gval)   // 42
 #include <tensor.h>
 
 Tensor a = tensor_zeros(2, 3)      // zeros / ones / full(r,c,v) / eye(n)
-tensor_set(a, 0, 0, 1.5)
+tensor_set(a, 0, 0, 1.5)           // set / fill
 print(tensor_get(a, 0, 0))         // 1.5
-Tensor c = tensor_add(a, b)        // elementwise: add/sub/mul/div
-Tensor m = tensor_matmul(a, t2)    // матричное умножение
-Tensor r = tensor_relu(x)          // relu / sigmoid / scale(t, s) / transpose
-print(tensor_sum(x))               // sum / mean / rows / cols
+
+Tensor c = tensor_add(a, b)        // elementwise: add / sub / mul / div
+Tensor m = tensor_matmul(a, t2)    // [r,n] x [n,c] -> [r,c]
+Tensor v = tensor_matvec(a, col)   // [r,c] x [c,1] -> [r,1]
+print(tensor_dot(a, b))            // скалярное произведение равных форм
+
+Tensor r = tensor_relu(x)          // relu / sigmoid / tanh / abs
+Tensor s = tensor_scale(x, 2)      // умножение на скаляр
+Tensor k = tensor_clip(x, -1, 1)   // ограничить диапазон
+Tensor t = tensor_transpose(x)     // [r,c] -> [c,r]
+Tensor d = tensor_copy(x)          // независимая копия данных
+
+print(tensor_sum(x))               // sum / mean / max / min
+print(tensor_argmax(x))            // индекс первого максимума
+print(tensor_rows(x), tensor_cols(x))
 tensor_print(m)                    // pretty-print Tensor[rows,cols]
-tensor_free(m)
+tensor_free(m)                     // ровно один раз на каждый handle
 ```
 
 Без точной директивы `#include <tensor.h>` тип `Tensor` и функции `tensor_*`
 являются ошибкой компиляции. Реализация находится в `include/tensor.h`, а не в
 сгенерированном C. Каждый конструктор и операция, возвращающая `Tensor`, создаёт
 новый владеющий handle; освободите его ровно один раз через `tensor_free`.
-Присваивание копирует только handle и не копирует данные.
+Присваивание копирует только handle и не копирует данные — для независимой
+копии есть `tensor_copy`.
 
 Для сборки программы с тензорами укажите путь к библиотеке и `libm`:
 
@@ -398,7 +410,38 @@ gcc -O2 -std=c11 -Iinclude -o program output.c -lm
 ```
 
 Неверные размеры, несовместимые формы, выход за границы, деление на ноль и
-ошибки выделения памяти завершают программу с диагностикой в `stderr`.
+ошибки выделения памяти завершают программу с диагностикой в `stderr` и
+кодом возврата 1. В диагностике печатаются обе формы — например
+`tensor: matmul shape mismatch: [2,3] x [2,2]`.
+
+Нативный бэкенд тензоры не поддерживает: `luc program.lu` без `-c` сразу
+сообщает, какие две команды нужны. Для v5 всё то же самое, только библиотека
+подключается через `incl`:
+
+```lu
+Lu/Strict
+
+incl <tensor.h>
+
+fn main() -> int {
+    var a: Tensor = tensor_full(2, 2, 3)
+    var e: Tensor = tensor_eye(2)
+    var s: Tensor = tensor_add(a, e)
+    tensor_print(s)
+
+    var m: float = tensor_mean(s)   // float в v5 — это C double
+    Pr(m)
+
+    tensor_free(s)
+    tensor_free(e)
+    tensor_free(a)
+    ret 0
+}
+```
+
+В v5 нет float-литералов, поэтому скаляры передаются целыми (`tensor_full(2, 2, 3)`,
+`tensor_clip(x, 0, 4)`); C приводит `int` к `double` при вызове. Значения `float`
+печатаются через `Pr`, тензоры — через `tensor_print` (у `Uios` нет float-перегрузки).
 
 ### Исправления (v3.2)
 

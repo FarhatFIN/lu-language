@@ -104,6 +104,84 @@ if "$work/tensor-bounds" > "$work/stdout" 2> "$work/stderr"; then
 fi
 grep -F 'tensor: index out of bounds' "$work/stderr" > /dev/null
 
+# ── v5 reaches tensor.h: `incl <tensor.h>` is a real C include ──
+cat > "$work/tensor-v5.lu" <<'EOF'
+Lu/Strict
+
+incl <tensor.h>
+
+fn main() -> int {
+    var a: Tensor = tensor_full(2, 2, 3)
+    var e: Tensor = tensor_eye(2)
+    var s: Tensor = tensor_add(a, e)
+    tensor_print(s)
+    var n: int = tensor_rows(s)
+    tensor_free(s)
+    tensor_free(e)
+    tensor_free(a)
+    ret n
+}
+EOF
+./luc "$work/tensor-v5.lu" -c -o "$work/tensor-v5.c" 2> "$work/stderr"
+grep -F '#include <tensor.h>' "$work/tensor-v5.c" > /dev/null
+if grep -F 'typedef struct lu_tensor_storage' "$work/tensor-v5.c" > /dev/null; then
+    printf '[FAIL] tensor implementation leaked into v5 output\n' >&2
+    exit 1
+fi
+cc -std=c11 -I../include "$work/tensor-v5.c" -lm -o "$work/tensor-v5"
+printf 'Tensor[2,2]\n  [4 3]\n  [3 4]\n' > "$work/tensor-v5.expected"
+set +e
+"$work/tensor-v5" > "$work/stdout"
+rc=$?
+set -e
+test "$rc" -eq 2
+cmp -s "$work/stdout" "$work/tensor-v5.expected"
+
+cat > "$work/tensor-v5-no-include.lu" <<'EOF'
+Lu/Strict
+
+fn main() -> int {
+    var a: Tensor = tensor_zeros(2, 2)
+    tensor_free(a)
+    ret 0
+}
+EOF
+expect_failure "type 'Tensor' needs \`incl <tensor.h>\`" \
+    ./luc "$work/tensor-v5-no-include.lu" -c -o "$work/rejected.c"
+
+cat > "$work/tensor-v5-bad-arity.lu" <<'EOF'
+Lu/Strict
+
+incl <tensor.h>
+
+fn main() -> int {
+    var a: Tensor = tensor_zeros(2)
+    tensor_free(a)
+    ret 0
+}
+EOF
+expect_failure "'tensor_zeros' expects 2 argument(s), got 1" \
+    ./luc "$work/tensor-v5-bad-arity.lu" -c -o "$work/rejected.c"
+
+expect_failure 'tensor.h needs the C backend' ./luc "$work/tensor-v5.lu" -o "$work/tensor-v5"
+
+cat > "$work/tensor-shape.lu" <<'EOF'
+Lu/Language
+#include <tensor.h>
+def main() -> void {
+    Tensor a = tensor_zeros(2, 2)
+    Tensor b = tensor_zeros(2, 3)
+    tensor_print(tensor_add(a, b))
+}
+EOF
+./luc "$work/tensor-shape.lu" -c -o "$work/tensor-shape.c" 2> "$work/stderr"
+cc -std=c11 -I../include "$work/tensor-shape.c" -lm -o "$work/tensor-shape"
+if "$work/tensor-shape" > "$work/stdout" 2> "$work/stderr"; then
+    printf '[FAIL] mismatched tensor shapes unexpectedly succeeded\n' >&2
+    exit 1
+fi
+grep -F 'tensor: elementwise: shape mismatch [2,2] vs [2,3]' "$work/stderr" > /dev/null
+
 cat > "$work/removed-network.lu" <<'EOF'
 Lu/Language
 #q1

@@ -1516,20 +1516,60 @@ tensor_free(c)
 | `tensor_ones(r, c)` | единицы |
 | `tensor_full(r, c, v)` | заполнить значением |
 | `tensor_eye(n)` | единичная матрица |
+| `tensor_copy(a)` | независимая копия данных |
 | `tensor_get` / `tensor_set` | доступ к элементу |
 | `tensor_fill` | заполнить на месте |
 | `tensor_add/sub/mul/div` | поэлементные операции |
 | `tensor_scale(a, k)` | умножение на скаляр |
-| `tensor_matmul(a, b)` | матричное умножение |
+| `tensor_matmul(a, b)` | матричное умножение `[r,n] x [n,c]` |
+| `tensor_matvec(a, v)` | матрица `[r,c]` на вектор `[c,1]` |
+| `tensor_dot(a, b)` | скалярное произведение равных форм |
 | `tensor_transpose` | транспонирование |
-| `tensor_relu` / `tensor_sigmoid` | активации |
+| `tensor_abs` / `tensor_relu` / `tensor_sigmoid` / `tensor_tanh` | поэлементные функции |
+| `tensor_clip(a, low, high)` | ограничить значения диапазоном |
 | `tensor_sum` / `tensor_mean` | сумма / среднее |
+| `tensor_max` / `tensor_min` | максимум / минимум |
+| `tensor_argmax` | индекс первого максимума |
 | `tensor_rows` / `tensor_cols` | размеры |
 | `tensor_print` | печать |
 | `tensor_free` | освободить данные |
 
 Поэлементные операции требуют одинаковых форм; при несовпадении программа
-сообщает об ошибке и завершается.
+сообщает обе формы и завершается:
+
+```
+tensor: elementwise: shape mismatch [2,2] vs [2,3]
+```
+
+То же для `tensor_matmul`, `tensor_matvec`, `tensor_dot`, индексов
+(`index out of bounds: [2,0] not inside [2,2]`), деления на ноль
+(`division by zero at [r,c]`) и `tensor_clip` с `low > high`.
+
+Каждый вызов, возвращающий `Tensor`, создаёт новый владеющий handle —
+освобождайте его ровно один раз через `tensor_free`. Присваивание копирует
+только handle, поэтому для независимой копии есть `tensor_copy`.
+
+Из v5 библиотека подключается через `incl` и работает после `-c`:
+
+```lu
+Lu/Strict
+
+incl <tensor.h>
+
+fn main() -> int {
+    var a: Tensor = tensor_full(2, 2, 3)
+    var s: Tensor = tensor_scale(a, 2)
+    tensor_print(s)
+    Pr(tensor_sum(s))               // float -> C double
+    tensor_free(s)
+    tensor_free(a)
+    ret 0
+}
+```
+
+В v5 нет float-литералов: скаляры задаются целыми, C приводит их к `double`.
+Нативный бэкенд тензоры не поддерживает — компилятор сам подскажет команды
+`luc -c -o out.c` и `cc -std=c11 -Iinclude out.c -lm`.
 
 ### Сети
 
