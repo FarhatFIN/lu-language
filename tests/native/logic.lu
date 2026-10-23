@@ -1,0 +1,48 @@
+Lu/Language
+
+// Logical operators: `&&` and `||` produce a bool, short-circuit, and must
+// agree between the native and the C backend.  This is a regression test
+// for a native `||` that jumped to the false branch, so `true || x` came
+// out as false.
+
+fn yes(hits: ptr/int) -> bool {
+    hits[0] = hits[0] + 1
+    return true
+}
+
+fn no(hits: ptr/int) -> bool {
+    hits[0] = hits[0] + 1
+    return false
+}
+
+fn main() -> int {
+    var t: bool = true
+    var f: bool = false
+
+    print(t || f, f || t, f || f, t || t)
+    print(t && f, f && t, t && t, f && f)
+    print(!t, !f)
+
+    var hits: int = 0
+    if t || yes(&hits) {
+        print("or keeps the first true")
+    }
+    if f && yes(&hits) {
+        print("and stops at the first false")
+    }
+    print(hits)
+
+    var i: int = 0
+    var n: int = 0
+    while i < 10 && n < 3 {
+        n = n + 1
+        i = i + 1
+    }
+    print(n, i)
+
+    var c: int = 32
+    if c == 32 || c == 9 || c == 10 || c == 13 {
+        print("whitespace")
+    }
+    return 0
+}

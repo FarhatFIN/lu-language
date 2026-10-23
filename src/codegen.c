@@ -2081,6 +2081,20 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
             gen_node(cg, n);
     }
 
+    /* Types before globals, prototypes and blocks: a global of struct type
+       (`vid out: Stream`) needs the typedef to exist already. */
+    for (int i = 0; root && i < root->children.count; i++) {
+        ASTNode *n = root->children.items[i];
+        if (n->kind == NODE_UNION_DECL || n->kind == NODE_ENUM_DECL)
+            gen_node(cg, n);
+        else if (struct_has_methods(n))
+            gen_class_struct_decl(cg, n);
+        else if (n->kind == NODE_STRUCT_DECL)
+            gen_node(cg, n);
+        else if (node_is_class_like(n))
+            gen_class_struct_decl(cg, n);
+    }
+
     /* Global variable declarations (top-level NODE_VAR_DECL without initialiser
        or with constant initialiser) — emitted before functions so functions
        can reference them. */
@@ -2140,19 +2154,6 @@ static void gen_top_level(Codegen *cg, ASTNode *root) {
             emit(cg, ";\n");
             cg_sym_add(cg, n->sval ? n->sval : "_g", n->type_name, true);
         }
-    }
-
-    /* Types before prototypes and blocks. */
-    for (int i = 0; root && i < root->children.count; i++) {
-        ASTNode *n = root->children.items[i];
-        if (n->kind == NODE_UNION_DECL || n->kind == NODE_ENUM_DECL)
-            gen_node(cg, n);
-        else if (struct_has_methods(n))
-            gen_class_struct_decl(cg, n);
-        else if (n->kind == NODE_STRUCT_DECL)
-            gen_node(cg, n);
-        else if (node_is_class_like(n))
-            gen_class_struct_decl(cg, n);
     }
 
     /* Function and method prototypes: fixes calls to functions declared later. */

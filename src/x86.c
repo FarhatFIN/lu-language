@@ -937,22 +937,23 @@ static void gen_binop(X *x, ASTNode *n) {
     ASTNode *lhs = n->children.items[0];
     ASTNode *rhs = n->children.items[1];
 
-    /* short-circuit logic */
+    /* short-circuit logic: `a && b` bails out to 0 on the first false
+       operand, `a || b` to 1 on the first true one. */
     if (!strcmp(op, "&&") || !strcmp(op, "||")) {
-        int lshort = new_label(x), lend = new_label(x);
+        bool is_and = !strcmp(op, "&&");
+        int lexit = new_label(x), lend = new_label(x);
         gen_expr(x, lhs);
         if (x->failed) return;
         i_test_rax(x);
-        if (!strcmp(op, "&&")) i_jcc(x, CC_E, lshort);
-        else                   i_jcc(x, CC_NE, lshort);
+        i_jcc(x, is_and ? CC_E : CC_NE, lexit);
         gen_expr(x, rhs);
         if (x->failed) return;
         i_test_rax(x);
-        i_jcc(x, CC_E, lshort);
-        i_mov_rax_imm(x, 1);
+        i_jcc(x, is_and ? CC_E : CC_NE, lexit);
+        i_mov_rax_imm(x, is_and ? 1 : 0);
         i_jmp(x, lend);
-        place_label(x, lshort);
-        i_mov_rax_imm(x, 0);
+        place_label(x, lexit);
+        i_mov_rax_imm(x, is_and ? 0 : 1);
         place_label(x, lend);
         return;
     }

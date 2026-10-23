@@ -4,5 +4,7 @@ incl <std/io>
 incl <mylib/ui>
 
 fn main() -> int {
+    Pr(mylib_banner())
+    Pr(mylib_twice(21))
     ret 0
 }

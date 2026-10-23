@@ -1,0 +1,43 @@
+Lu/Strict
+
+// Uios: потоки ввода-вывода в духе <iostream>.
+// Здесь проверяется и вывод (`<<`, методы put_*), и ввод (`>>`, get_line).
+
+incl <Uios>
+
+fn main() -> int {
+    Uout << "hello" << Uendl
+    Uout << 42 << " " << -7 << " " << 0 << Uendl
+    Uout << true << " " << false << Uendl
+
+    var big: int64 = int64(1234567890123)
+    Uout << big << Uendl
+
+    var ch: byte = byte(65)
+    Uout << ch << Uendl
+
+    Uout.put_str("method").put_int(7).put_str("!").put_byte(byte(10))
+    Uout.flush()
+
+    var a: int = 0
+    var b: int64 = 0
+    Uin >> a >> b
+    Uout << "a=" << a << " b=" << b << Uendl
+
+    var line: byte[128]
+    var n: int = Uin.get_line(&line[0], 128)
+    Uout << "len=" << n << " text="
+    Uout.put_chars(&line[0])
+    Uout << Uendl
+
+    var flag: bool = false
+    Uin >> flag
+    Uout << "flag=" << flag << Uendl
+
+    var one: byte = byte(0)
+    Uin >> one
+    Uout << "byte=" << one << Uendl
+
+    Uerr << "stderr works" << Uendl
+    ret 0
+}

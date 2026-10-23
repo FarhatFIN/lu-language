@@ -1,0 +1,315 @@
+Lu/Strict
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Uios — потоки ввода-вывода в духе <iostream>.
+//
+//      incl <Uios>
+//
+//      Uout << "x = " << 42 << Uendl
+//      Uerr << "ошибка" << Uendl
+//      Uin >> n
+//
+//  `<<` отправляет значение в поток, `>>` читает значение из потока.
+//  Оператор выбирает метод по типу правого операнда:
+//
+//      int    -> put_int   / get_int
+//      int64  -> put_i64   / get_i64
+//      byte   -> put_byte  / get_byte      (пишется сам байт, не число)
+//      bool   -> put_bool  / get_bool      (true / false)
+//      str    -> put_str
+//      ptr/T  -> put_ptr
+//
+//  Методы возвращают ptr/свой тип, поэтому цепочка `Uout << a << b` работает:
+//  каждый `<<` подставляет в поток очередное значение.
+//
+//  Вывод не буферизуется: один вызов — один write(2). Поэтому Uendl — это
+//  просто "\n", а flush() ничего не делает, но остаётся ради совместимости
+//  с привычной записью `Uout.flush()`.
+//
+//  Потоки не хранят состояния: дескриптор зашит в тип (Uout_t -> 1,
+//  Uerr_t -> 2, Uin_t -> 0), потому что vid-переменные неизменяемы и
+//  поле потока нельзя было бы перенастроить. Поле `pad` держит структуру
+//  непустой: пустые структуры — расширение C.
+// ═════════════════════════════════════════════════════════════════════════
+
+// ── байтовые примитивы ─────────────────────────────────────────────────
+
+fn __uios_len(s: str) -> int {
+    var i: int = 0
+    while s[i] != 0 {
+        set i = i + 1
+    }
+    ret i
+}
+
+fn __uios_write(fd: int, p: ptr/byte, n: int) -> int {
+    ret syscall(1, fd, p, n)
+}
+
+fn __uios_puts(fd: int, s: str) -> int {
+    ret syscall(1, fd, s, __uios_len(s))
+}
+
+fn __uios_putc(fd: int, c: byte) -> int {
+    var b: byte[1]
+    set b[0] = c
+    ret syscall(1, fd, &b[0], 1)
+}
+
+// Десятичная запись int64: 20 цифр + знак с запасом.
+fn __uios_puti(fd: int, v: int64) -> int {
+    var buf: byte[24]
+    var i: int = 24
+    var neg: bool = false
+    var n: int64 = v
+
+    if n < 0 {
+        set neg = true
+        set n = 0 - n
+    }
+    if n == 0 {
+        set i = i - 1
+        set buf[i] = byte(48)
+    }
+    while n > 0 {
+        set i = i - 1
+        set buf[i] = byte(48 + int(n % 10))
+        set n = n / 10
+    }
+    if neg {
+        set i = i - 1
+        set buf[i] = byte(45)
+    }
+    ret syscall(1, fd, &buf[i], 24 - i)
+}
+
+// Один байт из потока; -1 — конец файла или ошибка.
+fn __uios_readc(fd: int) -> int {
+    var b: byte[1]
+    var r: int = syscall(0, fd, &b[0], 1)
+    if r <= 0 {
+        ret -1
+    }
+    ret int(b[0])
+}
+
+// Целое в десятичной записи. Ведущие пробелы пропускаются, чтение
+// останавливается на первом не-символе цифры (он уже съеден).
+// Конец файла даёт 0.
+fn __uios_geti(fd: int) -> int64 {
+    var n: int64 = 0
+    var neg: bool = false
+    var c: int  = __uios_readc(fd)
+
+    while c == 32 || c == 9 || c == 10 || c == 13 {
+        set c = __uios_readc(fd)
+    }
+    if c == 45 {
+        set neg = true
+        set c = __uios_readc(fd)
+    }
+    if c == 43 {
+        set c = __uios_readc(fd)
+    }
+    while c >= 48 && c <= 57 {
+        set n = n * 10 + int64(c - 48)
+        set c = __uios_readc(fd)
+    }
+    if neg {
+        ret 0 - n
+    }
+    ret n
+}
+
+// Строка до перевода строки. Возвращает длину; сама строка
+// дописывается нулём, поэтому её можно печатать как str.
+fn __uios_getline(fd: int, p: ptr/byte, cap: int) -> int {
+    var n: int = 0
+    var b: byte[1]
+    var r: int = 0
+    var stop: bool = false
+
+    while !stop && n < cap - 1 {
+        set r = syscall(0, fd, &b[0], 1)
+        if r <= 0 {
+            set stop = true
+        } else {
+            if b[0] == 10 {
+                set stop = true
+            } else {
+                if b[0] != 13 {
+                    set p[n] = b[0]
+                    set n = n + 1
+                }
+            }
+        }
+    }
+    if cap > 0 {
+        set p[n] = byte(0)
+    }
+    ret n
+}
+
+// ── вывод ──────────────────────────────────────────────────────────────
+
+struct Uout_t {
+    pub pad: byte
+
+    fn put_str(self, s: str) -> ptr/Uout_t {
+        __uios_puts(1, s)
+        ret self
+    }
+
+    fn put_int(self, v: int) -> ptr/Uout_t {
+        __uios_puti(1, int64(v))
+        ret self
+    }
+
+    fn put_i64(self, v: int64) -> ptr/Uout_t {
+        __uios_puti(1, v)
+        ret self
+    }
+
+    fn put_byte(self, v: byte) -> ptr/Uout_t {
+        __uios_putc(1, v)
+        ret self
+    }
+
+    fn put_bool(self, v: bool) -> ptr/Uout_t {
+        if v {
+            __uios_puts(1, "true")
+        } else {
+            __uios_puts(1, "false")
+        }
+        ret self
+    }
+
+    fn put_ptr(self, p: ptr/byte) -> ptr/Uout_t {
+        __uios_puts(1, "0x")
+        __uios_puti(1, int64(p))
+        ret self
+    }
+
+    fn put_bytes(self, p: ptr/byte, n: int) -> ptr/Uout_t {
+        __uios_write(1, p, n)
+        ret self
+    }
+
+    // Печатает байты до нуля — так выводят буфер, заполненный get_line.
+    fn put_chars(self, p: ptr/byte) -> ptr/Uout_t {
+        var i: int = 0
+        while p[i] != 0 {
+            set i = i + 1
+        }
+        __uios_write(1, p, i)
+        ret self
+    }
+
+    fn flush(self) -> ptr/Uout_t {
+        ret self
+    }
+}
+
+struct Uerr_t {
+    pub pad: byte
+
+    fn put_str(self, s: str) -> ptr/Uerr_t {
+        __uios_puts(2, s)
+        ret self
+    }
+
+    fn put_int(self, v: int) -> ptr/Uerr_t {
+        __uios_puti(2, int64(v))
+        ret self
+    }
+
+    fn put_i64(self, v: int64) -> ptr/Uerr_t {
+        __uios_puti(2, v)
+        ret self
+    }
+
+    fn put_byte(self, v: byte) -> ptr/Uerr_t {
+        __uios_putc(2, v)
+        ret self
+    }
+
+    fn put_bool(self, v: bool) -> ptr/Uerr_t {
+        if v {
+            __uios_puts(2, "true")
+        } else {
+            __uios_puts(2, "false")
+        }
+        ret self
+    }
+
+    fn put_ptr(self, p: ptr/byte) -> ptr/Uerr_t {
+        __uios_puts(2, "0x")
+        __uios_puti(2, int64(p))
+        ret self
+    }
+
+    fn put_bytes(self, p: ptr/byte, n: int) -> ptr/Uerr_t {
+        __uios_write(2, p, n)
+        ret self
+    }
+
+    fn put_chars(self, p: ptr/byte) -> ptr/Uerr_t {
+        var i: int = 0
+        while p[i] != 0 {
+            set i = i + 1
+        }
+        __uios_write(2, p, i)
+        ret self
+    }
+
+    fn flush(self) -> ptr/Uerr_t {
+        ret self
+    }
+}
+
+// ── ввод ───────────────────────────────────────────────────────────────
+
+struct Uin_t {
+    pub pad: byte
+
+    fn get_int(self, dst: ptr/int) -> ptr/Uin_t {
+        set dst[0] = int(__uios_geti(0))
+        ret self
+    }
+
+    fn get_i64(self, dst: ptr/int64) -> ptr/Uin_t {
+        set dst[0] = __uios_geti(0)
+        ret self
+    }
+
+    fn get_byte(self, dst: ptr/byte) -> ptr/Uin_t {
+        var c: int = __uios_readc(0)
+        if c < 0 {
+            set dst[0] = byte(0)
+        } else {
+            set dst[0] = byte(c)
+        }
+        ret self
+    }
+
+    fn get_bool(self, dst: ptr/bool) -> ptr/Uin_t {
+        if __uios_geti(0) != 0 {
+            set dst[0] = true
+        } else {
+            set dst[0] = false
+        }
+        ret self
+    }
+
+    // Возвращает длину прочитанной строки (без завершающего нуля).
+    fn get_line(self, dst: ptr/byte, cap: int) -> int {
+        ret __uios_getline(0, dst, cap)
+    }
+}
+
+// ── сами потоки и общая константа конца строки ────────────────────────
+
+vid Uout: Uout_t
+vid Uerr: Uerr_t
+vid Uin:  Uin_t
+vid Uendl: str = "\n"

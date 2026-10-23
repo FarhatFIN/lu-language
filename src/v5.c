@@ -17,6 +17,9 @@
  *   for i in a..b    ->  counted loop with an explicit counter
  */
 
+/* readlink() and friends live behind the POSIX 2008 feature test macro. */
+#define _POSIX_C_SOURCE 200809L
+
 #include "v5.h"
 
 #include <ctype.h>
@@ -25,6 +28,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 
 /* ─────────────────────────── tiny string buffer ─────────────────────────── */
 
@@ -188,6 +192,7 @@ typedef struct {
     char      *text;
     long long  num;
     int        line, col;
+    const char *file;          /* source file the token came from */
 } Tok;
 
 /* ─────────────────────────── symbols / program ─────────────────────────── */
@@ -218,6 +223,7 @@ typedef struct {
 typedef struct {
     const char *path;
     char       *dir;
+    const char *cur_file;
 
     Tok *tk;
     int  nt, nt_alloc, pos;
@@ -244,6 +250,10 @@ typedef struct {
     bool last_was_strlit;
     bool last_was_literal;
 
+    /* files pulled in with `incl <...>` (absolute paths, included once) */
+    char **inc;
+    int    ninc, cinc;
+
     /* loop contexts: 0 = normal, 1 = range-for with an explicit counter */
     int   loop_kind[64];
     char *loop_inc[64];
@@ -254,14 +264,17 @@ typedef struct {
 
 static void verr(V5 *v, int line, const char *fmt, ...)
 {
-    char    msg[400];
-    va_list ap;
+    char        msg[400];
+    const char *file = v->path;
+    va_list     ap;
     if (v->failed) return;
+    if (v->tk && v->pos < v->nt && v->tk[v->pos].file)
+        file = v->tk[v->pos].file;
     va_start(ap, fmt);
     vsnprintf(msg, sizeof msg, fmt, ap);
     va_end(ap);
     snprintf(v->err, sizeof v->err, "%s:%d: error: %s",
-             v->path, line, msg);
+             file, line, msg);
     v->failed = true;
 }
 
@@ -472,6 +485,7 @@ static void add_tok(V5 *v, int kind, char *text, long long num, int line, int co
     v->tk[v->nt].num  = num;
     v->tk[v->nt].line = line;
     v->tk[v->nt].col  = col;
+    v->tk[v->nt].file = v->cur_file;
     v->nt++;
 }
 
@@ -953,6 +967,29 @@ static Type *primary(V5 *v, Buf *b)
             verr(v, tk->line,
                  "Alloc(n) may only initialise a pointer declaration");
 
+        /* syscall(nr, args...) — forwarded to the backend untouched */
+        if (!strcmp(s, "syscall") && peek(v, 1)->kind == TK_PUNCT &&
+            !strcmp(peek(v, 1)->text, "(")) {
+            int n = 0;
+            adv(v);
+            buf_puts(b, "syscall(");
+            expect_p(v, "(");
+            while (!v->failed && !at_p(v, ")")) {
+                Buf   arg;
+                memset(&arg, 0, sizeof arg);
+                expr(v, &arg);
+                if (n) buf_puts(b, ", ");
+                buf_add(b, arg.s ? arg.s : "", arg.len);
+                free(arg.s);
+                n++;
+                if (at_p(v, ",")) { adv(v); continue; }
+                break;
+            }
+            expect_p(v, ")");
+            buf_putc(b, ')');
+            return &ty_int;
+        }
+
         if (peek(v, 1)->kind == TK_PUNCT && !strcmp(peek(v, 1)->text, "(")) {
             Fn *f = find_fn(v, s);
             if (!f) {
@@ -1167,10 +1204,57 @@ static int prec_of(V5 *v, Tok *t)
     if (!strcmp(t->text, "==") || !strcmp(t->text, "!=")) return 3;
     if (!strcmp(t->text, "<")  || !strcmp(t->text, "<=") ||
         !strcmp(t->text, ">")  || !strcmp(t->text, ">=")) return 4;
-    if (!strcmp(t->text, "+")  || !strcmp(t->text, "-"))  return 5;
+    if (!strcmp(t->text, "<<") || !strcmp(t->text, ">>")) return 5;
+    if (!strcmp(t->text, "+")  || !strcmp(t->text, "-"))  return 6;
     if (!strcmp(t->text, "*")  || !strcmp(t->text, "/") ||
-        !strcmp(t->text, "%"))  return 6;
+        !strcmp(t->text, "%"))  return 7;
     return 0;
+}
+
+/* Suffix used to pick the `put_<suffix>` / `get_<suffix>` method of a
+   stream struct for a value of type `t`. */
+static const char *stream_suffix(Type *t)
+{
+    switch (t->kind) {
+    case TY_INT:   return "int";
+    case TY_I64:   return "i64";
+    case TY_BYTE:  return "byte";
+    case TY_BOOL:  return "bool";
+    case TY_STR:   return "str";
+    case TY_PTR:   return "ptr";
+    case TY_NAMED: return t->name;
+    default:       return NULL;
+    }
+}
+
+/* True when tokens [from, to) spell a place expression: name, name.f and
+   name[i] chains.  `>>` needs one, because it hands out an address. */
+static bool is_place_tokens(V5 *v, int from, int to)
+{
+    int i = from;
+    if (i >= to || v->tk[i].kind != TK_ID) return false;
+    i++;
+    while (i < to) {
+        if (v->tk[i].kind == TK_PUNCT && !strcmp(v->tk[i].text, ".")) {
+            i++;
+            if (i >= to || v->tk[i].kind != TK_ID) return false;
+            i++;
+        } else if (v->tk[i].kind == TK_PUNCT && !strcmp(v->tk[i].text, "[")) {
+            int depth = 1;
+            i++;
+            while (i < to && depth > 0) {
+                if (v->tk[i].kind == TK_PUNCT) {
+                    if (!strcmp(v->tk[i].text, "[")) depth++;
+                    else if (!strcmp(v->tk[i].text, "]")) depth--;
+                }
+                i++;
+            }
+            if (depth != 0) return false;
+        } else {
+            return false;
+        }
+    }
+    return true;
 }
 
 static Type *binary(V5 *v, Buf *b, int minp);
@@ -1273,6 +1357,7 @@ static Type *binary(V5 *v, Buf *b, int minp)
         Buf  rhs;
         Type *rt, *res;
         const char *op;
+        int  opline, rtok0, rtok1;
 
         if (v->failed || p < minp || p == 0) break;
 
@@ -1282,11 +1367,107 @@ static Type *binary(V5 *v, Buf *b, int minp)
             continue;
         }
 
+        opline = cur(v)->line;
         op = cur(v)->text;
         adv(v);
 
         memset(&rhs, 0, sizeof rhs);
+        rtok0 = v->pos;
         rt = binary(v, &rhs, p + 1);
+        rtok1 = v->pos;
+
+        /* `stream << value` / `stream >> place` call the stream's
+           put_<kind> / get_<kind> method; anything numeric stays a shift. */
+        if (!strcmp(op, "<<") || !strcmp(op, ">>")) {
+            bool    write = !strcmp(op, "<<");
+            Struct *st = struct_of(v, lhs);
+
+            if (st) {
+                const char *suf = stream_suffix(rt);
+                char        mname[160];
+                Fn         *m;
+                Buf         call;
+
+                if (!suf) {
+                    verr(v, opline, "cannot stream a %s value", kind_name(rt->kind));
+                    free(rhs.s);
+                    return lhs;
+                }
+                if (!write && rt->kind != TY_INT && rt->kind != TY_I64 &&
+                    rt->kind != TY_BYTE && rt->kind != TY_BOOL) {
+                    verr(v, opline,
+                         "'>>' reads into int, int64, byte or bool, not %s",
+                         kind_name(rt->kind));
+                    free(rhs.s);
+                    return lhs;
+                }
+                snprintf(mname, sizeof mname, "%s_%s",
+                         write ? "put" : "get", suf);
+                m = struct_method(st, mname);
+                if (!m) {
+                    verr(v, opline, "'%s' has no method for %s with '%s'",
+                         st->name, kind_name(rt->kind), op);
+                    free(rhs.s);
+                    return lhs;
+                }
+                if (m->np < 2 || !m->ptype[1]) {
+                    verr(v, opline, "stream method '%s' takes no value", mname);
+                    free(rhs.s);
+                    return lhs;
+                }
+                if (write) {
+                    if (!compat(m->ptype[1], rt)) {
+                        verr(v, opline, "'%s' expects %s, found %s", mname,
+                             kind_name(m->ptype[1]->kind), kind_name(rt->kind));
+                        free(rhs.s);
+                        return lhs;
+                    }
+                } else {
+                    Type *want = m->ptype[1];
+                    if (want->kind != TY_PTR || !compat(want->base, rt)) {
+                        verr(v, opline, "'%s' expects a pointer to %s", mname,
+                             kind_name(rt->kind));
+                        free(rhs.s);
+                        return lhs;
+                    }
+                    if (!is_place_tokens(v, rtok0, rtok1)) {
+                        verr(v, opline,
+                             "right side of '>>' must be a variable, field or element");
+                        free(rhs.s);
+                        return lhs;
+                    }
+                }
+
+                memset(&call, 0, sizeof call);
+                buf_printf(&call, "%s__%s(", st->name, mname);
+                if (lhs->kind == TY_PTR) {
+                    buf_add(&call, b->s + start, b->len - start);
+                } else {
+                    buf_puts(&call, "(&");
+                    buf_add(&call, b->s + start, b->len - start);
+                    buf_putc(&call, ')');
+                }
+                buf_puts(&call, ", ");
+                if (!write) buf_putc(&call, '&');
+                buf_add(&call, rhs.s ? rhs.s : "", rhs.len);
+                buf_putc(&call, ')');
+
+                b->len = start;
+                if (b->s) b->s[start] = '\0';
+                buf_add(b, call.s, call.len);
+                free(call.s);
+                free(rhs.s);
+                lhs = m->ret ? m->ret : &ty_int;
+                v->last_bit_width = 0;
+                continue;
+            }
+
+            if (!is_num(lhs) || !is_num(rt)) {
+                verr(v, opline, "operator '%s' needs numbers or a stream", op);
+                free(rhs.s);
+                return lhs;
+            }
+        }
 
         res = &ty_int;
         if (!strcmp(op, "||") || !strcmp(op, "&&") ||
@@ -1294,6 +1475,9 @@ static Type *binary(V5 *v, Buf *b, int minp)
             !strcmp(op, "<")  || !strcmp(op, "<=") ||
             !strcmp(op, ">")  || !strcmp(op, ">="))
             res = &ty_bool;
+        if ((!strcmp(op, "<<") || !strcmp(op, ">>")) &&
+            (lhs->kind == TY_I64 || rt->kind == TY_I64))
+            res = &ty_i64;
 
         if ((!strcmp(op, "==") || !strcmp(op, "!=")) &&
             lhs->kind == TY_STR && rt->kind == TY_STR) {
@@ -1393,7 +1577,10 @@ static void stmt(V5 *v)
     }
 
     if (t->kind == TK_ID && peek(v, 1)->kind == TK_PUNCT &&
-        !strcmp(peek(v, 1)->text, "(")) {
+        (!strcmp(peek(v, 1)->text, "(") ||
+         !strcmp(peek(v, 1)->text, ".") ||
+         !strcmp(peek(v, 1)->text, "<<") ||
+         !strcmp(peek(v, 1)->text, ">>"))) {
         int line = t->line;
         Buf b;
         memset(&b, 0, sizeof b);
@@ -2147,10 +2334,164 @@ static void parse_block_raw(V5 *v)
     } while (depth > 0 && cur(v)->kind != TK_EOF);
 }
 
+/* ─────────────────────────── include files ─────────────────────────────── */
+
+static bool file_readable(const char *p)
+{
+    FILE *f = fopen(p, "rb");
+    if (!f) return false;
+    fclose(f);
+    return true;
+}
+
+static char *read_whole_file(const char *p)
+{
+    FILE   *f = fopen(p, "rb");
+    long    n;
+    size_t  got;
+    char   *s;
+
+    if (!f) return NULL;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return NULL; }
+    n = ftell(f);
+    if (n < 0) { fclose(f); return NULL; }
+    rewind(f);
+    s = malloc((size_t)n + 1);
+    if (!s) { fclose(f); return NULL; }
+    got = fread(s, 1, (size_t)n, f);
+    fclose(f);
+    s[got] = '\0';
+    return s;
+}
+
+static char *path_dir(const char *p)
+{
+    char *d = xstrdup(p ? p : ".");
+    char *slash = strrchr(d, '/');
+    if (slash) *slash = '\0';
+    else { free(d); d = xstrdup("."); }
+    return d;
+}
+
+static char *path_join(const char *dir, const char *name)
+{
+    size_t n = strlen(dir) + strlen(name) + 2;
+    char  *s = malloc(n);
+    if (!s) { fputs("out of memory\n", stderr); exit(1); }
+    snprintf(s, n, "%s/%s", dir, name);
+    return s;
+}
+
+static char *exe_dir(void)
+{
+    char    buf[4096];
+    ssize_t n = readlink("/proc/self/exe", buf, sizeof buf - 1);
+    if (n <= 0) return NULL;
+    buf[n] = '\0';
+    return path_dir(buf);
+}
+
+/* Look for `name` (with .lu appended when no extension is given) next to the
+   including file, then in ./include, ../include, $LU_INCLUDE and finally
+   next to the compiler binary.  Returns a malloc'd path or NULL. */
+static char *resolve_include(const char *from_file, const char *main_path,
+                             const char *name)
+{
+    char *dirs[20];
+    int   nd = 0, i;
+    char *dir, *exe, *env, *found = NULL;
+    char  ext[512];
+
+    dir = path_dir(from_file ? from_file : main_path);
+    dirs[nd++] = dir;
+    dirs[nd++] = xstrdup(".");
+    dirs[nd++] = xstrdup("include");
+    dirs[nd++] = xstrdup("../include");
+
+    exe = exe_dir();
+    if (exe) {
+        dirs[nd++] = path_join(exe, "include");
+        dirs[nd++] = path_join(exe, "../include");
+        free(exe);
+    }
+
+    env = getenv("LU_INCLUDE");
+    if (env && *env) {
+        char *copy = xstrdup(env), *p = copy, *q;
+        while (p && *p && nd < 18) {
+            q = strchr(p, ':');
+            if (q) *q = '\0';
+            if (*p) dirs[nd++] = xstrdup(p);
+            p = q ? q + 1 : NULL;
+        }
+        free(copy);
+    }
+
+    snprintf(ext, sizeof ext, "%s.lu", name);
+
+    for (i = 0; i < nd && !found; i++) {
+        char *cand;
+        size_t l = strlen(name);
+
+        if (l > 3 && !strcmp(name + l - 3, ".lu")) {
+            cand = path_join(dirs[i], name);
+            if (file_readable(cand)) found = cand; else free(cand);
+            continue;
+        }
+        cand = path_join(dirs[i], ext);
+        if (file_readable(cand)) { found = cand; }
+        else {
+            free(cand);
+            cand = path_join(dirs[i], name);
+            if (file_readable(cand)) found = cand; else free(cand);
+        }
+    }
+
+    for (i = 0; i < nd; i++) free(dirs[i]);
+    return found;
+}
+
+static bool already_included(V5 *v, const char *path)
+{
+    int i;
+    for (i = 0; i < v->ninc; i++)
+        if (!strcmp(v->inc[i], path)) return true;
+    return false;
+}
+
+static void remember_include(V5 *v, const char *path)
+{
+    if (v->ninc == v->cinc) {
+        v->cinc = v->cinc ? v->cinc * 2 : 8;
+        v->inc = realloc(v->inc, (size_t)v->cinc * sizeof *v->inc);
+    }
+    v->inc[v->ninc++] = xstrdup(path);
+}
+
+/* Insert `n` tokens starting at base[off] just after `incl <...>`; the
+   whole array `base` is taken over (and released) by this call. */
+static void splice_tokens(V5 *v, Tok *base, int off, int n)
+{
+    if (n > 0) {
+        if (v->nt + n > v->nt_alloc) {
+            while (v->nt_alloc < v->nt + n)
+                v->nt_alloc = v->nt_alloc ? v->nt_alloc * 2 : 256;
+            v->tk = realloc(v->tk, (size_t)v->nt_alloc * sizeof *v->tk);
+        }
+        memmove(&v->tk[v->pos + n], &v->tk[v->pos],
+                (size_t)(v->nt - v->pos) * sizeof *v->tk);
+        memcpy(&v->tk[v->pos], base + off, (size_t)n * sizeof *base);
+        v->nt += n;
+    }
+    free(base);
+}
+
 static void parse_include(V5 *v)
 {
-    int line = cur(v)->line;
-    Buf path;
+    int         line = cur(v)->line;
+    const char *from = cur(v)->file ? cur(v)->file : v->path;
+    Buf         path;
+
     adv(v);
     memset(&path, 0, sizeof path);
     if (at_p(v, "<")) {
@@ -2167,9 +2508,68 @@ static void parse_include(V5 *v)
         verr(v, line, "include path must be written as <name>");
         return;
     }
-    (void)line;
+    if (v->failed) { free(path.s); return; }
+
     /* the std/ namespace is provided by the compiler itself */
     if (!strncmp(path.s ? path.s : "", "std/", 4)) { free(path.s); return; }
+
+    /* pass 1 pulls the file in once; pass 2 walks the tokens already spliced
+       into the stream, so the directive itself only needs to be skipped. */
+    if (v->scan) {
+        char *full = resolve_include(from, v->path, path.s ? path.s : "");
+        if (!full) {
+            verr(v, line, "include file '%s' not found", path.s ? path.s : "");
+        } else if (already_included(v, full)) {
+            free(full);
+        } else {
+            char *src = read_whole_file(full);
+            if (!src) {
+                verr(v, line, "cannot read include file '%s'", full);
+            } else {
+                Tok *save_tk     = v->tk;
+                int  save_nt     = v->nt;
+                int  save_alloc  = v->nt_alloc;
+                int  save_pos    = v->pos;
+                const char *save_file = v->cur_file;
+                int  first;
+
+                v->tk = NULL; v->nt = 0; v->nt_alloc = 0; v->pos = 0;
+                v->cur_file = full;
+                lex_all(v, src);
+                free(src);
+
+                first = (v->nt >= 3 &&
+                         !strcmp(v->tk[0].text, "Lu") &&
+                         !strcmp(v->tk[1].text, "/") &&
+                         !strcmp(v->tk[2].text, "Strict")) ? 3 : 0;
+                if (first == 0 && !v->failed) {
+                    v->err[0] = '\0';
+                    v->failed = true;
+                    snprintf(v->err, sizeof v->err,
+                             "%s:1: error: first line must be 'Lu/Strict'", full);
+                }
+
+                {
+                    Tok *add   = v->tk;
+                    int  nadd  = v->nt - 1;   /* keep the main file's EOF */
+                    int  off   = first;
+
+                    v->tk = save_tk;
+                    v->nt = save_nt;
+                    v->nt_alloc = save_alloc;
+                    v->pos = save_pos;
+                    v->cur_file = save_file;
+
+                    if (!v->failed)
+                        splice_tokens(v, add, off, nadd - off);
+                    else
+                        free(add);
+                }
+                remember_include(v, full);
+            }
+            free(full);
+        }
+    }
     free(path.s);
 }
 
@@ -2591,6 +2991,7 @@ char *v5_transpile(const char *path, const char *src, char *err, size_t errcap)
 
     memset(&v, 0, sizeof v);
     v.path     = path;
+    v.cur_file = path;
     v.out_line = 1;
     v.tmp      = 0;
 

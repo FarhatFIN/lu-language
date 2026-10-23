@@ -29,7 +29,11 @@ for src in "$here"/good/*.lu; do
     fi
 
     set +e
-    "$work/$name" < /dev/null > "$work/$name.stdout" 2>&1
+    prog_in=/dev/null
+    if [ -f "$here/good/$name.stdin" ]; then
+        prog_in="$here/good/$name.stdin"
+    fi
+    "$work/$name" < "$prog_in" > "$work/$name.stdout" 2>&1
     rc=$?
     set -e
 
@@ -54,6 +58,40 @@ for src in "$here"/good/*.lu; do
         cat "$work/$name.diff" >&2
         fail=$((fail + 1))
         continue
+    fi
+
+    # The same program through the C backend must agree, so a fixture pins
+    # down both backends rather than only the native one.
+    if command -v cc > /dev/null 2>&1; then
+        if ! ./luc -c "$src" -o "$work/$name.c" > "$work/$name.cbuild" 2>&1; then
+            printf '[FAIL] %s: C backend did not translate\n' "$name" >&2
+            cat "$work/$name.cbuild" >&2
+            fail=$((fail + 1))
+            continue
+        fi
+        if ! cc -std=c11 -O2 -o "$work/$name.cc" "$work/$name.c" \
+                > "$work/$name.cc.err" 2>&1; then
+            printf '[FAIL] %s: generated C does not build\n' "$name" >&2
+            cat "$work/$name.cc.err" >&2
+            fail=$((fail + 1))
+            continue
+        fi
+        set +e
+        "$work/$name.cc" < "$prog_in" > "$work/$name.cstdout" 2>&1
+        crc=$?
+        set -e
+        if [ "$crc" != "$want_rc" ]; then
+            printf '[FAIL] %s: C backend exit status %s, expected %s\n' \
+                "$name" "$crc" "$want_rc" >&2
+            fail=$((fail + 1))
+            continue
+        fi
+        if ! diff -u "$want_out" "$work/$name.cstdout" > "$work/$name.cdiff"; then
+            printf '[FAIL] %s: stdout differs on the C backend\n' "$name" >&2
+            cat "$work/$name.cdiff" >&2
+            fail=$((fail + 1))
+            continue
+        fi
     fi
     printf '[OK]   %s\n' "$name"
 done

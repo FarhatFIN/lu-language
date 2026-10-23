@@ -1,0 +1,10 @@
+Lu/Strict
+
+// Include path that exists nowhere on the search list: `incl` is a real
+// file inclusion, so this has to fail at compile time.
+
+incl <no/such/library>
+
+fn main() -> int {
+    ret 0
+}

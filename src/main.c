@@ -9,7 +9,7 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LUC_VERSION "4.3"
+#define LUC_VERSION "4.4"
 
 typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 

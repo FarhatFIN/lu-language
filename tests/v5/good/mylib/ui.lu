@@ -1,0 +1,12 @@
+Lu/Strict
+
+// Библиотека-фикстура для проверки `incl <mylib/ui>`:
+// путь берётся относительно файла, который её подключает.
+
+fn mylib_banner() -> str {
+    ret "mylib: подключено"
+}
+
+fn mylib_twice(n: int) -> int {
+    ret n * 2
+}
