@@ -1,0 +1,1003 @@
+Lu/Language
+
+// ═════════════════════════════════════════════════════════════════════════
+//  LuMotion — ядро композитинга.
+//
+//  Здесь живёт всё, что не зависит от окна: модель композиции, кейфреймы,
+//  растеризатор, шрифт, PPM и формат проекта `.lum`.  Редактор (motion.lu)
+//  и headless-рендерер (render.lu) подключают этот файл через
+//
+//      incl <core.lu>
+//
+//  Композиция — это список слоёв.  Слой имеет форму (kind), цвет, режим
+//  наложения (blend) и либо неподвижную позу (base), либо список
+//  кейфреймов (keys).  Поза — шесть чисел: x, y, sx, sy, rot, alpha,
+//  где sx/sy — половина ширины и высоты в пикселях кадра.
+//
+//  Кадр рисуется в буфер RGB (3 байта на пиксель) в порядке слоёв:
+//  первый слой в списке — нижний.
+// ═════════════════════════════════════════════════════════════════════════
+
+Import "<math.h>"
+Import "<stdlib.h>"
+Import "<string.h>"
+Import "<stdio.h>"
+
+// ── Пределы ──────────────────────────────────────────────────────────────
+const int MAXL = 32        // слоёв в композиции
+const int MAXK = 24        // кейфреймов на слой
+const int TLEN = 96        // символов в текстовом слое
+
+// ── Формы ────────────────────────────────────────────────────────────────
+const int K_RECT  = 0
+const int K_ELL   = 1
+const int K_TEXT  = 2
+const int K_GRAD  = 3
+const int K_GLOW  = 4
+
+// ── Наложение ────────────────────────────────────────────────────────────
+const int B_NORM = 0
+const int B_ADD  = 1
+const int B_MUL  = 2
+const int B_SCR  = 3
+
+// ── Интерполяция ─────────────────────────────────────────────────────────
+const int E_LIN    = 0
+const int E_SMOOTH = 1
+const int E_HOLD   = 2
+
+// ── Модель ───────────────────────────────────────────────────────────────
+
+struct Pose {
+    float x
+    float y
+    float sx
+    float sy
+    float rot
+    float alpha
+}
+
+struct Key {
+    float t          // кадр
+    float x
+    float y
+    float sx
+    float sy
+    float rot
+    float alpha
+    int   ease
+}
+
+struct Layer {
+    int   kind
+    int   blend
+    int   visible
+    int   color
+    int   color2
+    Pose  base
+    int   nkeys
+    Key   keys[24]
+    byte  text[96]
+    int   ntext
+}
+
+struct Comp {
+    int   w
+    int   h
+    int   fps
+    int   dur
+    int   bg0
+    int   bg1
+    int   bggrad
+    str   name
+    int   nlay
+    Layer layers[32]
+    int   sel
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Мелкая математика
+// ═════════════════════════════════════════════════════════════════════════
+
+def fabsf_(float v) -> float {
+    if v < 0.0 { return -v }
+    return v
+}
+
+def fminf_(float a, float b) -> float {
+    if a < b { return a }
+    return b
+}
+
+def fmaxf_(float a, float b) -> float {
+    if a > b { return a }
+    return b
+}
+
+def clampf(float v, float lo, float hi) -> float {
+    if v < lo { return lo }
+    if v > hi { return hi }
+    return v
+}
+
+def lerpf(float a, float b, float u) -> float {
+    return a + (b - a) * u
+}
+
+def ease_u(int ease, float u) -> float {
+    if ease == E_HOLD { return 0.0 }
+    if ease == E_SMOOTH { return u * u * (3.0 - 2.0 * u) }
+    return u
+}
+
+// ── Цвет: 0xRRGGBB ───────────────────────────────────────────────────────
+
+def col_r(int c) -> int { return (c >> 16) & 255 }
+def col_g(int c) -> int { return (c >> 8) & 255 }
+def col_b(int c) -> int { return c & 255 }
+
+def col_mix(int a, int b, float u) -> int {
+    float v = clampf(u, 0.0, 1.0)
+    int r = (int)((float)col_r(a) + ((float)col_r(b) - (float)col_r(a)) * v)
+    int g = (int)((float)col_g(a) + ((float)col_g(b) - (float)col_g(a)) * v)
+    int bl = (int)((float)col_b(a) + ((float)col_b(b) - (float)col_b(a)) * v)
+    return (r << 16) | (g << 8) | bl
+}
+
+def col_scale(int c, float k) -> int {
+    int r = (int)((float)col_r(c) * k)
+    int g = (int)((float)col_g(c) * k)
+    int b = (int)((float)col_b(c) * k)
+    return (r << 16) | (g << 8) | b
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Шрифт 5×7
+//
+//  Каждый глиф — семь строк по пять бит; старший бит строки — левый
+//  столбец.  Строчные буквы рисуются как заглавные, незнакомый символ —
+//  как пробел.  Кернинг: 5 пикселей глифа + 1 пиксель пробела.
+// ═════════════════════════════════════════════════════════════════════════
+
+const int FONTN = 52
+
+byte FONT[364] = {
+    0, 0, 0, 0, 0, 0, 0, 14, 17, 17, 31, 17, 17, 17, 30, 17,
+    17, 30, 17, 17, 30, 14, 17, 16, 16, 16, 17, 14, 30, 17, 17, 17,
+    17, 17, 30, 31, 16, 16, 30, 16, 16, 31, 31, 16, 16, 30, 16, 16,
+    16, 14, 17, 16, 23, 17, 17, 14, 17, 17, 17, 31, 17, 17, 17, 14,
+    4, 4, 4, 4, 4, 14, 7, 2, 2, 2, 2, 18, 12, 17, 18, 20,
+    24, 20, 18, 17, 16, 16, 16, 16, 16, 16, 31, 17, 27, 21, 21, 17,
+    17, 17, 17, 25, 21, 19, 17, 17, 17, 14, 17, 17, 17, 17, 17, 14,
+    30, 17, 17, 30, 16, 16, 16, 14, 17, 17, 17, 21, 18, 13, 30, 17,
+    17, 30, 20, 18, 17, 15, 16, 16, 14, 1, 1, 30, 31, 4, 4, 4,
+    4, 4, 4, 17, 17, 17, 17, 17, 17, 14, 17, 17, 17, 17, 17, 10,
+    4, 17, 17, 17, 21, 21, 21, 10, 17, 17, 10, 4, 10, 17, 17, 17,
+    17, 10, 4, 4, 4, 4, 31, 1, 2, 4, 8, 16, 31, 14, 17, 19,
+    21, 25, 17, 14, 4, 12, 4, 4, 4, 4, 14, 14, 17, 1, 2, 4,
+    8, 31, 30, 1, 1, 14, 1, 1, 30, 2, 6, 10, 19, 31, 2, 2,
+    31, 16, 30, 1, 1, 17, 14, 6, 8, 16, 30, 17, 17, 14, 31, 1,
+    2, 4, 8, 8, 8, 14, 17, 17, 14, 17, 17, 14, 14, 17, 17, 15,
+    1, 2, 12, 0, 0, 0, 0, 0, 6, 6, 0, 0, 0, 0, 6, 6,
+    8, 0, 6, 6, 0, 6, 6, 0, 4, 4, 4, 4, 4, 0, 4, 0,
+    0, 0, 31, 0, 0, 0, 0, 4, 4, 31, 4, 4, 0, 1, 2, 2,
+    4, 8, 8, 16, 14, 17, 1, 2, 4, 0, 4, 4, 4, 0, 0, 0,
+    0, 0, 2, 4, 8, 8, 8, 4, 2, 8, 4, 2, 2, 2, 4, 8,
+    25, 26, 4, 8, 19, 11, 0, 12, 18, 18, 12, 21, 18, 13, 10, 10,
+    31, 10, 31, 10, 10, 14, 17, 23, 21, 23, 16, 14
+}
+
+def glyph_index(int ch) -> int {
+    if ch >= 97 && ch <= 122 { ch = ch - 32 }
+    if ch >= 65 && ch <= 90 { return 1 + ch - 65 }
+    if ch >= 48 && ch <= 57 { return 27 + ch - 48 }
+    str punct = ".,:!-+/?'()%&#@"
+    int i = 0
+    while i < 15 {
+        if (int)punct[i] == ch { return 37 + i }
+        i += 1
+    }
+    return -1
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Слои и позы
+// ═════════════════════════════════════════════════════════════════════════
+
+def pose_zero(ptr/Pose p) -> void {
+    p->x = 0.0
+    p->y = 0.0
+    p->sx = 0.0
+    p->sy = 0.0
+    p->rot = 0.0
+    p->alpha = 1.0
+}
+
+def pose_set(ptr/Pose p, float x, float y, float sx, float sy) -> void {
+    p->x = x
+    p->y = y
+    p->sx = sx
+    p->sy = sy
+    p->rot = 0.0
+    p->alpha = 1.0
+}
+
+def text_units(ptr/Layer L) -> float {
+    return (float)L->ntext * 6.0 - 1.0
+}
+
+def text_fit(ptr/Layer L, float sy) -> void {
+    float u = text_units(L)
+    if u < 1.0 { u = 1.0 }
+    L->base.sy = sy
+    L->base.sx = sy * u / 7.0
+}
+
+def layer_text(ptr/Layer L, str s) -> void {
+    int n = len(s)
+    if n > TLEN - 1 { n = TLEN - 1 }
+    int i = 0
+    while i < n {
+        L->text[i] = s[i]
+        i += 1
+    }
+    L->text[n] = 0
+    L->ntext = n
+}
+
+def layer_init(ptr/Layer L, int kind) -> void {
+    L->kind = kind
+    L->blend = B_NORM
+    L->visible = 1
+    L->color = 4291853      // 0x417E4D — зелёный, чтобы новый слой был заметен
+    L->color2 = 1052688
+    L->nkeys = 0
+    L->ntext = 0
+    L->text[0] = 0
+    pose_set(&L->base, 320.0, 180.0, 80.0, 60.0)
+    if kind == K_GLOW {
+        L->color = 4234799      // 0x409AEF
+        L->blend = B_ADD
+    }
+    if kind == K_GRAD {
+        L->color = 657930
+        L->color2 = 1973790
+        L->blend = B_NORM
+        pose_set(&L->base, 320.0, 180.0, 320.0, 180.0)
+    }
+}
+
+def comp_init(ptr/Comp c, int w, int h, int fps, int dur) -> void {
+    c->w = w
+    c->h = h
+    c->fps = fps
+    c->dur = dur
+    c->bg0 = 657930          // 0x0A0A0A
+    c->bg1 = 1316112         // 0x14161A
+    c->bggrad = 1
+    c->name = "untitled"
+    c->nlay = 0
+    c->sel = -1
+}
+
+def comp_add(ptr/Comp c, int kind) -> int {
+    if c->nlay >= MAXL { return -1 }
+    int i = c->nlay
+    layer_init(&c->layers[i], kind)
+    c->nlay += 1
+    c->sel = i
+    return i
+}
+
+def comp_remove(ptr/Comp c, int idx) -> void {
+    if idx < 0 { return }
+    if idx >= c->nlay { return }
+    int i = idx
+    while i < c->nlay - 1 {
+        c->layers[i] = c->layers[i + 1]
+        i += 1
+    }
+    c->nlay -= 1
+    if c->sel >= c->nlay { c->sel = c->nlay - 1 }
+}
+
+// ── Кейфреймы ────────────────────────────────────────────────────────────
+
+def key_near(ptr/Layer L, float t) -> int {
+    int i = 0
+    while i < L->nkeys {
+        if fabsf_(L->keys[i].t - t) < 0.5 { return i }
+        i += 1
+    }
+    return -1
+}
+
+def key_put(ptr/Layer L, float t, ptr/Pose p, int ease) -> int {
+    int idx = key_near(L, t)
+    if idx < 0 {
+        if L->nkeys >= MAXK { return -1 }
+        idx = L->nkeys
+        while idx > 0 && L->keys[idx - 1].t > t {
+            L->keys[idx] = L->keys[idx - 1]
+            idx -= 1
+        }
+        L->nkeys += 1
+    }
+    L->keys[idx].t = t
+    L->keys[idx].x = p->x
+    L->keys[idx].y = p->y
+    L->keys[idx].sx = p->sx
+    L->keys[idx].sy = p->sy
+    L->keys[idx].rot = p->rot
+    L->keys[idx].alpha = p->alpha
+    L->keys[idx].ease = ease
+    return idx
+}
+
+def key_del(ptr/Layer L, float t) -> int {
+    int idx = key_near(L, t)
+    if idx < 0 { return 0 }
+    int i = idx
+    while i < L->nkeys - 1 {
+        L->keys[i] = L->keys[i + 1]
+        i += 1
+    }
+    L->nkeys -= 1
+    return 1
+}
+
+def pose_at(ptr/Layer L, float f, ptr/Pose out) -> void {
+    int n = L->nkeys
+    if n == 0 {
+        out->x = L->base.x
+        out->y = L->base.y
+        out->sx = L->base.sx
+        out->sy = L->base.sy
+        out->rot = L->base.rot
+        out->alpha = L->base.alpha
+        return
+    }
+    int i = n - 1
+    if f <= L->keys[0].t { i = 0 }
+    else if f < L->keys[n - 1].t {
+        i = 0
+        while i < n - 1 && f >= L->keys[i + 1].t { i += 1 }
+    }
+
+    if i >= n - 1 || f <= L->keys[0].t {
+        out->x = L->keys[i].x
+        out->y = L->keys[i].y
+        out->sx = L->keys[i].sx
+        out->sy = L->keys[i].sy
+        out->rot = L->keys[i].rot
+        out->alpha = L->keys[i].alpha
+        return
+    }
+
+    float a = L->keys[i].t
+    float b = L->keys[i + 1].t
+    float u = 0.0
+    if b > a { u = clampf((f - a) / (b - a), 0.0, 1.0) }
+    u = ease_u(L->keys[i].ease, u)
+
+    out->x = lerpf(L->keys[i].x, L->keys[i + 1].x, u)
+    out->y = lerpf(L->keys[i].y, L->keys[i + 1].y, u)
+    out->sx = lerpf(L->keys[i].sx, L->keys[i + 1].sx, u)
+    out->sy = lerpf(L->keys[i].sy, L->keys[i + 1].sy, u)
+    out->rot = lerpf(L->keys[i].rot, L->keys[i + 1].rot, u)
+    out->alpha = lerpf(L->keys[i].alpha, L->keys[i + 1].alpha, u)
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Растеризатор
+// ═════════════════════════════════════════════════════════════════════════
+
+def blend_px(ptr/byte rgb, int o, int sr, int sg, int sb, float a, int mode) -> void {
+    if a <= 0.0 { return }
+    if a > 1.0 { a = 1.0 }
+    int dr = (int)rgb[o]
+    int dg = (int)rgb[o + 1]
+    int db = (int)rgb[o + 2]
+    int r = dr
+    int g = dg
+    int b = db
+    float k = 1.0 - a
+
+    if mode == B_ADD {
+        r = dr + (int)((float)sr * a)
+        g = dg + (int)((float)sg * a)
+        b = db + (int)((float)sb * a)
+    } else if mode == B_MUL {
+        r = (int)((float)dr * k + (float)(dr * sr / 255) * a)
+        g = (int)((float)dg * k + (float)(dg * sg / 255) * a)
+        b = (int)((float)db * k + (float)(db * sb / 255) * a)
+    } else if mode == B_SCR {
+        int scr = 255 - (255 - dr) * (255 - sr) / 255
+        int scg = 255 - (255 - dg) * (255 - sg) / 255
+        int scb = 255 - (255 - db) * (255 - sb) / 255
+        r = (int)((float)dr * k + (float)scr * a)
+        g = (int)((float)dg * k + (float)scg * a)
+        b = (int)((float)db * k + (float)scb * a)
+    } else {
+        r = (int)((float)dr * k + (float)sr * a)
+        g = (int)((float)dg * k + (float)sg * a)
+        b = (int)((float)db * k + (float)sb * a)
+    }
+
+    if r < 0 { r = 0 }
+    if r > 255 { r = 255 }
+    if g < 0 { g = 0 }
+    if g > 255 { g = 255 }
+    if b < 0 { b = 0 }
+    if b > 255 { b = 255 }
+    rgb[o] = (byte)r
+    rgb[o + 1] = (byte)g
+    rgb[o + 2] = (byte)b
+}
+
+def fill_bg(ptr/Comp c, ptr/byte rgb) -> void {
+    int y = 0
+    while y < c->h {
+        float u = 0.0
+        if c->h > 1 { u = (float)y / (float)(c->h - 1) }
+        int col = c->bg0
+        if c->bggrad == 1 { col = col_mix(c->bg0, c->bg1, u) }
+        int r = col_r(col)
+        int g = col_g(col)
+        int b = col_b(col)
+        int x = 0
+        while x < c->w {
+            int o = (y * c->w + x) * 3
+            rgb[o] = (byte)r
+            rgb[o + 1] = (byte)g
+            rgb[o + 2] = (byte)b
+            x += 1
+        }
+        y += 1
+    }
+}
+
+def text_cov(ptr/Layer L, float lx, float ly) -> float {
+    if lx < -1.0 { return 0.0 }
+    if lx > 1.0 { return 0.0 }
+    if ly < -1.0 { return 0.0 }
+    if ly > 1.0 { return 0.0 }
+    float gw = text_units(L)
+    if gw <= 0.0 { return 0.0 }
+    float gx = (lx + 1.0) * 0.5 * gw
+    float gy = (ly + 1.0) * 0.5 * 7.0
+    int col = (int)floor(gx / 6.0)
+    if col < 0 { return 0.0 }
+    if col >= L->ntext { return 0.0 }
+    float cx = gx - (float)col * 6.0
+    int gcol = (int)floor(cx)
+    int grow = (int)floor(gy)
+    if gcol > 4 { return 0.0 }
+    if grow > 6 { return 0.0 }
+    int gi = glyph_index((int)L->text[col])
+    if gi < 0 { return 0.0 }
+    int bits = (int)FONT[gi * 7 + grow]
+    int bit = (bits >> (4 - gcol)) & 1
+    if bit == 1 { return 1.0 }
+    return 0.0
+}
+
+def raster_grad(ptr/Comp c, ptr/Layer L, ptr/Pose p, ptr/byte rgb) -> void {
+    int y = 0
+    while y < c->h {
+        float u = 0.0
+        if c->h > 1 { u = (float)y / (float)(c->h - 1) }
+        int col = col_mix(L->color, L->color2, u)
+        int r = col_r(col)
+        int g = col_g(col)
+        int b = col_b(col)
+        int x = 0
+        while x < c->w {
+            blend_px(rgb, (y * c->w + x) * 3, r, g, b, p->alpha, L->blend)
+            x += 1
+        }
+        y += 1
+    }
+}
+
+def raster(ptr/Comp c, ptr/Layer L, ptr/Pose p, ptr/byte rgb) -> void {
+    float al = clampf(p->alpha, 0.0, 1.0)
+    if al <= 0.003 { return }
+    if L->kind == K_GRAD {
+        raster_grad(c, L, p, rgb)
+        return
+    }
+
+    float sx = p->sx
+    float sy = p->sy
+    if sx < 0.35 { return }
+    if sy < 0.35 { return }
+
+    float ca = cos(p->rot)
+    float sa = sin(p->rot)
+    float ex = fabsf_(ca) * sx + fabsf_(sa) * sy
+    float ey = fabsf_(sa) * sx + fabsf_(ca) * sy
+
+    int x0 = (int)floor(p->x - ex - 1.0)
+    int x1 = (int)ceil(p->x + ex + 1.0)
+    int y0 = (int)floor(p->y - ey - 1.0)
+    int y1 = (int)ceil(p->y + ey + 1.0)
+    if x0 < 0 { x0 = 0 }
+    if y0 < 0 { y0 = 0 }
+    if x1 > c->w - 1 { x1 = c->w - 1 }
+    if y1 > c->h - 1 { y1 = c->h - 1 }
+    if x1 < x0 { return }
+    if y1 < y0 { return }
+
+    float edge = fminf_(sx, sy)
+    int sr = col_r(L->color)
+    int sg = col_g(L->color)
+    int sb = col_b(L->color)
+    int kind = L->kind
+
+    int x = x0
+    while x <= x1 {
+        int y = y0
+        while y <= y1 {
+            float dx = (float)x + 0.5 - p->x
+            float dy = (float)y + 0.5 - p->y
+            float lx = (dx * ca + dy * sa) / sx
+            float ly = (-dx * sa + dy * ca) / sy
+            float cov = 0.0
+
+            if kind == K_RECT {
+                float mx = 1.0 - fabsf_(lx)
+                float my = 1.0 - fabsf_(ly)
+                cov = clampf(fminf_(mx, my) * edge + 0.5, 0.0, 1.0)
+            } else if kind == K_ELL {
+                float rr = sqrt(lx * lx + ly * ly)
+                cov = clampf((1.0 - rr) * edge + 0.5, 0.0, 1.0)
+            } else if kind == K_GLOW {
+                float rg = sqrt(lx * lx + ly * ly)
+                if rg < 1.0 {
+                    float q = 1.0 - rg
+                    cov = q * q * (0.55 + 0.45 * q)
+                }
+            } else if kind == K_TEXT {
+                cov = text_cov(L, lx, ly)
+            }
+
+            if cov > 0.003 {
+                blend_px(rgb, (y * c->w + x) * 3, sr, sg, sb, cov * al, L->blend)
+            }
+            y += 1
+        }
+        x += 1
+    }
+}
+
+def render_frame(ptr/Comp c, int frame, ptr/byte rgb) -> void {
+    fill_bg(c, rgb)
+    int i = 0
+    while i < c->nlay {
+        if c->layers[i].visible == 1 {
+            Pose p
+            pose_at(&c->layers[i], (float)frame, &p)
+            raster(c, &c->layers[i], &p, rgb)
+        }
+        i += 1
+    }
+}
+
+// Верхний слой под точкой кадра — для выбора мышью.
+def comp_hit(ptr/Comp c, int frame, float x, float y) -> int {
+    int i = c->nlay - 1
+    while i >= 0 {
+        ptr/Layer L = &c->layers[i]
+        if L->visible == 1 && L->kind != K_GRAD {
+            Pose p
+            pose_at(L, (float)frame, &p)
+            if p.sx > 0.5 && p.sy > 0.5 {
+                float ca = cos(p.rot)
+                float sa = sin(p.rot)
+                float dx = x - p.x
+                float dy = y - p.y
+                float lx = (dx * ca + dy * sa) / p.sx
+                float ly = (-dx * sa + dy * ca) / p.sy
+                if fabsf_(lx) <= 1.0 && fabsf_(ly) <= 1.0 {
+                    return i
+                }
+            }
+        }
+        i -= 1
+    }
+    return -1
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Файлы: PPM и проект
+// ═════════════════════════════════════════════════════════════════════════
+
+def file_open_w(str path) -> int {
+    // open(path, O_WRONLY|O_CREAT|O_TRUNC, 0644)
+    return syscall(2, path, 577, 420)
+}
+
+def file_write_all(int fd, ptr/byte p, int n) -> int {
+    int done = 0
+    while done < n {
+        int r = syscall(1, fd, &p[done], n - done)
+        if r <= 0 { return -1 }
+        done += r
+    }
+    return done
+}
+
+def ppm_write(str path, ptr/byte rgb, int w, int h) -> int {
+    int fd = file_open_w(path)
+    if fd < 0 { return -1 }
+    byte hdr[64]
+    int n = snprintf((str)hdr, 64, "P6\n%d %d\n255\n", w, h)
+    if file_write_all(fd, &hdr[0], n) < 0 {
+        syscall(3, fd)
+        return -1
+    }
+    if file_write_all(fd, rgb, w * h * 3) < 0 {
+        syscall(3, fd)
+        return -1
+    }
+    syscall(3, fd)
+    return 0
+}
+
+// ── Токенайзер строк проекта ─────────────────────────────────────────────
+
+def tok_next(str s, ptr/int pos, ptr/byte out, int cap) -> int {
+    int i = pos[0]
+    int n = len(s)
+    while i < n {
+        int ch = (int)s[i]
+        if ch != 32 && ch != 9 { break }
+        i += 1
+    }
+    if i >= n {
+        pos[0] = i
+        out[0] = 0
+        return 0
+    }
+    int k = 0
+    while i < n {
+        int ch2 = (int)s[i]
+        if ch2 == 32 || ch2 == 9 { break }
+        if k < cap - 1 {
+            out[k] = (byte)ch2
+            k += 1
+        }
+        i += 1
+    }
+    out[k] = 0
+    pos[0] = i
+    return k
+}
+
+def hex_val(str s) -> int {
+    int n = len(s)
+    int i = 0
+    int v = 0
+    int neg = 0
+    if n > 1 && (int)s[0] == 45 {
+        neg = 1
+        i = 1
+    }
+    if i + 1 < n && (int)s[i] == 48 {
+        if (int)s[i + 1] == 120 || (int)s[i + 1] == 88 {
+            i += 2
+            while i < n {
+                int ch = (int)s[i]
+                int d = -1
+                if ch >= 48 && ch <= 57 { d = ch - 48 }
+                if ch >= 97 && ch <= 102 { d = ch - 87 }
+                if ch >= 65 && ch <= 70 { d = ch - 55 }
+                if d < 0 { break }
+                v = v * 16 + d
+                i += 1
+            }
+            if neg == 1 { return -v }
+            return v
+        }
+    }
+    return atoi(s)
+}
+
+def dup_str(str s) -> str {
+    int n = len(s) + 1
+    ptr/byte p = malloc(n)
+    if p == 0 { return "" }
+    memcpy(p, s, n)
+    return (str)p
+}
+
+def streq(str a, str b) -> bool {
+    return strcmp(a, b) == 0
+}
+
+def layer_name(int kind) -> str {
+    if kind == K_RECT { return "RECT" }
+    if kind == K_ELL { return "ELLIPSE" }
+    if kind == K_TEXT { return "TEXT" }
+    if kind == K_GRAD { return "GRADIENT" }
+    if kind == K_GLOW { return "GLOW" }
+    return "LAYER"
+}
+
+def blend_name(int m) -> str {
+    if m == B_ADD { return "ADD" }
+    if m == B_MUL { return "MUL" }
+    if m == B_SCR { return "SCREEN" }
+    return "NORMAL"
+}
+
+def ease_name(int e) -> str {
+    if e == E_SMOOTH { return "SMOOTH" }
+    if e == E_HOLD { return "HOLD" }
+    return "LINEAR"
+}
+
+// ── Сохранение ───────────────────────────────────────────────────────────
+
+def proj_save(ptr/Comp c, str path) -> int {
+    int cap = 65536
+    ptr/byte buf = malloc(cap)
+    if buf == 0 { return -1 }
+    int pos = 0
+
+    pos += snprintf((str)&buf[pos], cap - pos, "lum 1\n")
+    // Один вызов — одна строка: v4 обрывает список аргументов на переводе
+    // строки, поэтому длинные snprintf собраны в одну физическую строку.
+    pos += snprintf((str)&buf[pos], cap - pos, "comp %d %d %d %d %d %d %d\n", c->w, c->h, c->fps, c->dur, c->bg0, c->bg1, c->bggrad)
+    pos += snprintf((str)&buf[pos], cap - pos, "name %s\n", c->name)
+
+    int i = 0
+    while i < c->nlay {
+        ptr/Layer L = &c->layers[i]
+        pos += snprintf((str)&buf[pos], cap - pos, "layer %d %d %d %d %d\n", L->kind, L->blend, L->visible, L->color, L->color2)
+        pos += snprintf((str)&buf[pos], cap - pos, "pos %.3f %.3f %.3f %.3f %.3f %.3f\n", L->base.x, L->base.y, L->base.sx, L->base.sy, L->base.rot, L->base.alpha)
+        if L->kind == K_TEXT {
+            pos += snprintf((str)&buf[pos], cap - pos, "text %s\n", (str)L->text)
+        }
+        int k = 0
+        while k < L->nkeys {
+            pos += snprintf((str)&buf[pos], cap - pos, "key %.3f %.3f %.3f %.3f %.3f %.3f %.3f %d\n", L->keys[k].t, L->keys[k].x, L->keys[k].y, L->keys[k].sx, L->keys[k].sy, L->keys[k].rot, L->keys[k].alpha, L->keys[k].ease)
+            k += 1
+        }
+        pos += snprintf((str)&buf[pos], cap - pos, "end\n")
+        i += 1
+    }
+
+    int fd = file_open_w(path)
+    if fd < 0 {
+        free(buf)
+        return -1
+    }
+    file_write_all(fd, buf, pos)
+    syscall(3, fd)
+    free(buf)
+    return 0
+}
+
+// ── Загрузка ─────────────────────────────────────────────────────────────
+
+def proj_load(ptr/Comp c, str path) -> int {
+    str src = read_file(path)
+    if src == 0 { return -1 }
+    int n = len(src)
+    if n <= 0 { return -1 }
+
+    int li = -1
+    int i = 0
+    byte lb[512]
+    byte t[128]
+
+    while i < n {
+        int ln = 0
+        while i < n && (int)src[i] != 10 {
+            if ln < 511 {
+                lb[ln] = src[i]
+                ln += 1
+            }
+            i += 1
+        }
+        if i < n { i += 1 }
+        if ln > 0 && (int)lb[ln - 1] == 13 {
+            ln -= 1
+        }
+        lb[ln] = 0
+        if ln == 0 { continue }
+        if (int)lb[0] == 35 { continue }
+
+        int pos = 0
+        int tl = tok_next((str)lb, &pos, &t[0], 128)
+        if tl <= 0 { continue }
+
+        if streq((str)t, "comp") {
+            tok_next((str)lb, &pos, &t[0], 128)
+            int w = atoi((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int h = atoi((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int fps = atoi((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int dur = atoi((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int b0 = hex_val((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int b1 = hex_val((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int gr = atoi((str)t)
+            comp_init(c, w, h, fps, dur)
+            c->bg0 = b0
+            c->bg1 = b1
+            c->bggrad = gr
+        } else if streq((str)t, "name") {
+            int j = pos
+            while j < ln && ((int)lb[j] == 32 || (int)lb[j] == 9) { j += 1 }
+            int k = 0
+            byte nb[128]
+            while j < ln && k < 127 {
+                nb[k] = lb[j]
+                k += 1
+                j += 1
+            }
+            nb[k] = 0
+            c->name = dup_str((str)nb)
+        } else if streq((str)t, "layer") {
+            int idx = comp_add(c, 0)
+            if idx >= 0 {
+                li = idx
+                tok_next((str)lb, &pos, &t[0], 128)
+                c->layers[li].kind = atoi((str)t)
+                tok_next((str)lb, &pos, &t[0], 128)
+                c->layers[li].blend = atoi((str)t)
+                tok_next((str)lb, &pos, &t[0], 128)
+                c->layers[li].visible = atoi((str)t)
+                tok_next((str)lb, &pos, &t[0], 128)
+                c->layers[li].color = hex_val((str)t)
+                tok_next((str)lb, &pos, &t[0], 128)
+                c->layers[li].color2 = hex_val((str)t)
+            }
+        } else if streq((str)t, "end") {
+            li = -1
+        } else if li >= 0 && streq((str)t, "pos") {
+            tok_next((str)lb, &pos, &t[0], 128)
+            c->layers[li].base.x = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            c->layers[li].base.y = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            c->layers[li].base.sx = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            c->layers[li].base.sy = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            c->layers[li].base.rot = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            c->layers[li].base.alpha = atof((str)t)
+        } else if li >= 0 && streq((str)t, "text") {
+            int jj = pos
+            while jj < ln && ((int)lb[jj] == 32 || (int)lb[jj] == 9) { jj += 1 }
+            int kk = 0
+            byte tb[TLEN]
+            while jj < ln && kk < TLEN - 1 {
+                tb[kk] = lb[jj]
+                kk += 1
+                jj += 1
+            }
+            tb[kk] = 0
+            c->layers[li].ntext = kk
+            int q = 0
+            while q < kk {
+                c->layers[li].text[q] = tb[q]
+                q += 1
+            }
+            c->layers[li].text[kk] = 0
+        } else if li >= 0 && streq((str)t, "key") {
+            Pose p
+            tok_next((str)lb, &pos, &t[0], 128)
+            float kt = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            p.x = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            p.y = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            p.sx = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            p.sy = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            p.rot = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            p.alpha = atof((str)t)
+            tok_next((str)lb, &pos, &t[0], 128)
+            int ez = atoi((str)t)
+            key_put(&c->layers[li], kt, &p, ez)
+        }
+    }
+
+    c->sel = c->nlay - 1
+    return 0
+}
+
+// ═════════════════════════════════════════════════════════════════════════
+//  Демо-композиция: заголовок, который можно монтировать сразу
+// ═════════════════════════════════════════════════════════════════════════
+
+def demo_key(ptr/Layer L, float t, float x, float y, float sx, float sy, float rot, float alpha, int ease) -> void {
+    Pose p
+    p.x = x
+    p.y = y
+    p.sx = sx
+    p.sy = sy
+    p.rot = rot
+    p.alpha = alpha
+    key_put(L, t, &p, ease)
+}
+
+def comp_demo(ptr/Comp c) -> void {
+    comp_init(c, 640, 360, 30, 150)
+    c->bg0 = 657930
+    c->bg1 = 1448202
+    c->bggrad = 1
+    c->name = "lu-motion-title"
+
+    // ── 1. глубокий фон с лёгким сдвигом ──
+    int bg = comp_add(c, K_GRAD)
+    c->layers[bg].color = 657930
+    c->layers[bg].color2 = 1778220
+    c->layers[bg].blend = B_NORM
+    demo_key(&c->layers[bg], 0.0, 320, 180, 320, 180, 0.0, 1.0, E_SMOOTH)
+
+    // ── 2. тёплое свечение, режим ADD ──
+    int glow = comp_add(c, K_GLOW)
+    c->layers[glow].color = 16479790      // 0xFB6E2E
+    c->layers[glow].blend = B_ADD
+    demo_key(&c->layers[glow], 0.0, 300, 205, 90, 90, 0.0, 0.0, E_SMOOTH)
+    demo_key(&c->layers[glow], 18.0, 300, 190, 250, 250, 0.0, 0.55, E_SMOOTH)
+    demo_key(&c->layers[glow], 96.0, 340, 178, 285, 285, 0.0, 0.42, E_SMOOTH)
+    demo_key(&c->layers[glow], 150.0, 380, 168, 340, 340, 0.0, 0.18, E_SMOOTH)
+
+    // ── 3. холодный контр-акцент, режим SCREEN ──
+    int cool = comp_add(c, K_GLOW)
+    c->layers[cool].color = 2586879      // 0x2779BF
+    c->layers[cool].blend = B_SCR
+    demo_key(&c->layers[cool], 0.0, 470, 120, 60, 60, 0.0, 0.0, E_SMOOTH)
+    demo_key(&c->layers[cool], 40.0, 452, 110, 170, 170, 0.0, 0.45, E_SMOOTH)
+    demo_key(&c->layers[cool], 150.0, 430, 96, 200, 200, 0.0, 0.25, E_SMOOTH)
+
+    // ── 4. акцентная полоса под заголовком ──
+    int bar = comp_add(c, K_RECT)
+    c->layers[bar].color = 16757250      // 0xFFB400
+    demo_key(&c->layers[bar], 0.0, 320, 246, 0.0, 2.5, 0.0, 0.0, E_SMOOTH)
+    demo_key(&c->layers[bar], 20.0, 320, 246, 126.0, 2.5, 0.0, 1.0, E_SMOOTH)
+    demo_key(&c->layers[bar], 90.0, 320, 246, 120.0, 2.5, 0.0, 1.0, E_SMOOTH)
+    demo_key(&c->layers[bar], 150.0, 320, 249, 176.0, 2.0, 0.0, 0.0, E_SMOOTH)
+
+    // ── 5. заголовок ──
+    int title = comp_add(c, K_TEXT)
+    layer_text(&c->layers[title], "LUMOTION")
+    c->layers[title].color = 16773329     // 0xFFD8D1
+    text_fit(&c->layers[title], 27.0)
+    float thw = c->layers[title].base.sx
+    demo_key(&c->layers[title], 0.0, 320, 232, thw * 0.86, 23.0, 0.0, 0.0, E_SMOOTH)
+    demo_key(&c->layers[title], 26.0, 320, 205, thw * 1.03, 28.0, -0.01, 1.0, E_SMOOTH)
+    demo_key(&c->layers[title], 34.0, 320, 207, thw, 27.0, 0.0, 1.0, E_SMOOTH)
+
+    // ── 6. подзаголовок ──
+    int sub = comp_add(c, K_TEXT)
+    layer_text(&c->layers[sub], "COMPOSITING TOOLKIT")
+    c->layers[sub].color = 11131573      // 0xA9D0B5
+    text_fit(&c->layers[sub], 8.0)
+    float shw = c->layers[sub].base.sx
+    demo_key(&c->layers[sub], 0.0, 320, 286, shw, 8.0, 0.0, 0.0, E_SMOOTH)
+    demo_key(&c->layers[sub], 44.0, 320, 282, shw, 8.0, 0.0, 0.85, E_SMOOTH)
+    demo_key(&c->layers[sub], 150.0, 320, 284, shw, 8.0, 0.0, 0.55, E_SMOOTH)
+
+    // ── 7. тонкая линия внизу ──
+    int rule = comp_add(c, K_RECT)
+    c->layers[rule].color = 3885687
+    demo_key(&c->layers[rule], 0.0, 320, 318, 210, 0.5, 0.0, 0.0, E_LIN)
+    demo_key(&c->layers[rule], 60.0, 320, 318, 210, 0.5, 0.0, 0.5, E_LIN)
+
+    c->sel = title
+}

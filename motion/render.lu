@@ -1,0 +1,153 @@
+Lu/Language
+
+// ═════════════════════════════════════════════════════════════════════════
+//  lumotion-render — headless-рендерер LuMotion.
+//
+//  Окно ему не нужно: он читает проект `.lum` (или собирает встроенную
+//  демо-сцену) и пишет кадры в PPM.  Так его можно гонять в скриптах, в
+//  тестах и на машине без X-сервера.
+//
+//      lumotion-render <project.lum> --still 42 out.ppm
+//      lumotion-render <project.lum> --seq frames 0 149
+//      lumotion-render --demo --info
+//
+//  Сборка:
+//
+//      luc render.lu -o render.c
+//      cc -O2 -std=c11 render.c -lm -o lumotion-render
+// ═════════════════════════════════════════════════════════════════════════
+
+incl <core.lu>
+
+def usage() -> void {
+    printf("lumotion-render — headless renderer for LuMotion\n")
+    printf("\n")
+    printf("usage:\n")
+    printf("  lumotion-render <project.lum> [options]\n")
+    printf("  lumotion-render --demo        [options]\n")
+    printf("\n")
+    printf("options:\n")
+    printf("  --still <frame> <out.ppm>       render one frame\n")
+    printf("  --seq <dir> <from> <to>         render a frame range (frame_0000.ppm)\n")
+    printf("  --write <out.lum>               save the loaded (or demo) scene as .lum\n")
+    printf("  --info                          print composition details\n")
+    printf("  --help                          this text\n")
+}
+
+def comp_info(ptr/Comp c) -> void {
+    printf("project : %s\n", c->name)
+    printf("size    : %d x %d @ %d fps, %d frames (%.2f s)\n", c->w, c->h, c->fps, c->dur, (float)c->dur / (float)c->fps)
+    printf("layers  : %d\n", c->nlay)
+    int i = 0
+    while i < c->nlay {
+        ptr/Layer L = &c->layers[i]
+        printf("  [%d] %-8s blend=%-6s keys=%d color=#%06X\n", i, layer_name(L->kind), blend_name(L->blend), L->nkeys, L->color)
+        i += 1
+    }
+}
+
+def clamp_frame(ptr/Comp c, int f) -> int {
+    if f < 0 { return 0 }
+    if f > c->dur - 1 { return c->dur - 1 }
+    return f
+}
+
+def main() -> void {
+    if __luc_argc < 2 {
+        usage()
+        return
+    }
+
+    str src = __luc_argv[1]
+    if streq(src, "--help") || streq(src, "-h") {
+        usage()
+        return
+    }
+
+    Comp c
+    if streq(src, "--demo") {
+        comp_demo(&c)
+    } else if proj_load(&c, src) != 0 {
+        printf("error: cannot read project '%s'\n", src)
+        return
+    }
+
+    ptr/byte rgb = malloc(c.w * c.h * 3)
+    if rgb == 0 {
+        printf("error: out of memory for a %dx%d frame\n", c.w, c.h)
+        return
+    }
+
+    int wrote = 0
+    int argi = 2
+    while argi < __luc_argc {
+        str a = __luc_argv[argi]
+
+        if streq(a, "--info") {
+            comp_info(&c)
+            argi += 1
+        } else if streq(a, "--still") {
+            if argi + 2 >= __luc_argc {
+                printf("error: --still needs <frame> <out.ppm>\n")
+                break
+            }
+            int f = clamp_frame(&c, atoi(__luc_argv[argi + 1]))
+            str out = __luc_argv[argi + 2]
+            render_frame(&c, f, rgb)
+            if ppm_write(out, rgb, c.w, c.h) != 0 {
+                printf("error: cannot write '%s'\n", out)
+                break
+            }
+            printf("frame %d -> %s\n", f, out)
+            wrote += 1
+            argi += 3
+        } else if streq(a, "--write") {
+            if argi + 1 >= __luc_argc {
+                printf("error: --write needs <out.lum>\n")
+                break
+            }
+            str out = __luc_argv[argi + 1]
+            if proj_save(&c, out) != 0 {
+                printf("error: cannot write '%s'\n", out)
+                break
+            }
+            printf("wrote %s (%d layers)\n", out, c.nlay)
+            argi += 2
+        } else if streq(a, "--seq") {
+            if argi + 3 >= __luc_argc {
+                printf("error: --seq needs <dir> <from> <to>\n")
+                break
+            }
+            str dir = __luc_argv[argi + 1]
+            int from = clamp_frame(&c, atoi(__luc_argv[argi + 2]))
+            int to = clamp_frame(&c, atoi(__luc_argv[argi + 3]))
+            int fr = from
+            int bad = 0
+            while fr <= to {
+                byte path[512]
+                snprintf((str)path, 512, "%s/frame_%04d.ppm", dir, fr)
+                render_frame(&c, fr, rgb)
+                if ppm_write((str)path, rgb, c.w, c.h) != 0 {
+                    printf("error: cannot write '%s'\n", (str)path)
+                    bad = 1
+                    break
+                }
+                wrote += 1
+                fr += 1
+            }
+            if bad == 0 {
+                printf("%d frames %d..%d -> %s\n", to - from + 1, from, to, dir)
+            }
+            argi += 4
+        } else {
+            printf("error: unknown option '%s' (try --help)\n", a)
+            break
+        }
+    }
+
+    if wrote == 0 && __luc_argc == 2 {
+        usage()
+    }
+
+    free(rgb)
+}

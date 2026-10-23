@@ -1,0 +1,1129 @@
+Lu/Language
+
+// ═════════════════════════════════════════════════════════════════════════
+//  LuMotion — редактор моушн-графики на Lu (X11).
+//
+//  Одно окно, один софтверный фреймбуфер: панели, таймлайн и превью
+//  рисуются в обычный int-массив и уходят на экран одним XPutImage.
+//  Поэтому UI не зависит от шрифтов X-сервера — используется битмап-шрифт
+//  из core.lu, тот же, которым рендерятся текстовые слои.
+//
+//  Модель данных, растеризатор, ключевые кадры и формат .lum живут в
+//  core.lu; headless-рендерер — в render.lu.  Здесь только редактор.
+//
+//  Сборка:
+//
+//      ../src/luc motion.lu -o motion.c
+//      cc -O2 -std=c11 motion.c -lm -lX11 -o lumotion
+//
+//  Запуск:
+//
+//      ./lumotion                 встроенная демо-сцена
+//      ./lumotion scene.lum       открыть проект
+// ═════════════════════════════════════════════════════════════════════════
+
+Import "<X11/Xlib.h>"
+Import "<X11/keysym.h>"
+Import "<X11/Xutil.h>"
+
+incl <core.lu>
+
+// ── Геометрия окна ───────────────────────────────────────────────────────
+const int WIN_W   = 1200
+const int WIN_H   = 760
+const int HDR_H   = 40          // шапка
+const int TL_Y    = 570         // начало таймлайна
+const int CAN_W   = 900         // ширина области превью
+const int PANEL_X = 900         // правая панель
+const int PANEL_W = 300
+const int LAB_W   = 150         // колонка имён в таймлайне
+const int TX0     = 156         // первый кадр на линейке
+const int TX1     = 1190        // последний кадр на линейке
+const int RULER_H = 18
+const int ROW_H   = 20          // высота строки списка слоёв
+const int LIST_Y0 = 64          // первая строка списка слоёв
+const int LIST_H  = 180
+const int INSP_Y  = 250         // инспектор под списком слоёв
+const int TB_X    = 300         // транспорт в шапке
+const int TB_Y    = 8
+const int TB_W    = 30
+const int TB_H    = 24
+
+// ── Цвета интерфейса ─────────────────────────────────────────────────────
+int TH_BG = 0
+int TH_HEAD = 0
+int TH_CANVAS = 0
+int TH_PANEL = 0
+int TH_ROW = 0
+int TH_ROW_SEL = 0
+int TH_LINE = 0
+int TH_TEXT = 0
+int TH_DIM = 0
+int TH_ACC = 0
+int TH_ACC2 = 0
+int TH_BLUE = 0
+int TH_GREEN = 0
+int TH_RED = 0
+
+// ── Состояние приложения ─────────────────────────────────────────────────
+Comp g_c
+ptr/Display g_d = 0
+Window g_win = 0
+GC g_gc = 0
+ptr/XImage g_img = 0
+ptr/int g_fb = 0
+ptr/byte g_rgb = 0
+
+int g_frame = 0
+int g_play = 0
+int g_dirty = 1
+int g_running = 1
+int g_pvx = 130
+int g_pvy = 125
+int g_lrow = 0          // первая видимая строка списка слоёв
+int g_trow = 0          // первая видимая строка таймлайна
+int g_scrub = 0         // тянем плейхед
+int g_drag = 0          // тянем слой на превью
+int g_tedit = 0         // ввод текста слоя
+int g_tlen = 0
+byte g_tbuf[96]
+float g_drag_px = 0.0
+float g_drag_py = 0.0
+Pose g_drag_pose
+int g_msg_t = 0
+byte g_msg[128]
+str g_path = "out.lum"
+
+const int PALN = 10
+int PAL[10] = {
+    16757250,  // 0xFFB202 золото
+    16479790,  // 0xFB762E оранжевый
+    2586879,   // 0x2778FF синий
+    5095034,   // 0x4DBE7A зелёный
+    16773329,  // 0xFFD8D1 тёплый белый
+    16711860,  // 0xFEE6B4 кремовый
+    2474040,   // 0x25C1F8 голубой
+    13787647,  // 0xD260FF фиолетовый
+    16727786,  // 0xFF3F6A розовый
+    14408667   // 0xDBDADB серый
+}
+int g_pal = 0
+
+// ── Время ────────────────────────────────────────────────────────────────
+
+struct TS {
+    int64 sec
+    int64 nsec
+}
+
+def now_ms() -> int64 {
+    TS ts
+    syscall(228, 1, &ts)
+    return ts.sec * 1000 + ts.nsec / 1000000
+}
+
+def sleep_ms(int ms) -> void {
+    TS ts
+    ts.sec = ms / 1000
+    ts.nsec = (ms % 1000) * 1000000
+    syscall(35, &ts, 0)
+}
+
+// ── Фреймбуфер ───────────────────────────────────────────────────────────
+
+def rgb(int r, int g, int b) -> int {
+    return (r << 16) | (g << 8) | b
+}
+
+def theme_init() -> void {
+    TH_BG     = rgb(16, 17, 20)
+    TH_HEAD   = rgb(24, 26, 31)
+    TH_CANVAS = rgb(11, 12, 15)
+    TH_PANEL  = rgb(22, 24, 29)
+    TH_ROW    = rgb(22, 24, 29)
+    TH_ROW_SEL = rgb(44, 49, 60)
+    TH_LINE   = rgb(46, 50, 59)
+    TH_TEXT   = rgb(226, 229, 235)
+    TH_DIM    = rgb(138, 145, 160)
+    TH_ACC    = rgb(255, 178, 2)
+    TH_ACC2   = rgb(251, 118, 46)
+    TH_BLUE   = rgb(39, 120, 255)
+    TH_GREEN  = rgb(77, 190, 122)
+    TH_RED    = rgb(255, 84, 84)
+}
+
+def fb_px(int x, int y, int col) -> void {
+    if x < 0 or y < 0 or x >= WIN_W or y >= WIN_H { return }
+    g_fb[y * WIN_W + x] = col
+}
+
+def fb_rect(int x, int y, int w, int h, int col) -> void {
+    int j = 0
+    while j < h {
+        int yy = y + j
+        if yy >= 0 and yy < WIN_H {
+            int base = yy * WIN_W
+            int i = 0
+            while i < w {
+                int xx = x + i
+                if xx >= 0 and xx < WIN_W { g_fb[base + xx] = col }
+                i += 1
+            }
+        }
+        j += 1
+    }
+}
+
+def fb_frame(int x, int y, int w, int h, int col) -> void {
+    fb_rect(x, y, w, 1, col)
+    fb_rect(x, y + h - 1, w, 1, col)
+    fb_rect(x, y, 1, h, col)
+    fb_rect(x + w - 1, y, 1, h, col)
+}
+
+def fb_line(int x0, int y0, int x1, int y1, int col) -> void {
+    int dx = x1 - x0
+    int dy = y1 - y0
+    int sx = 1
+    int sy = 1
+    if dx < 0 { dx = 0 - dx; sx = -1 }
+    if dy < 0 { dy = 0 - dy; sy = -1 }
+    int err = dx - dy
+    int run = 1
+    while run == 1 {
+        fb_px(x0, y0, col)
+        if x0 == x1 and y0 == y1 {
+            run = 0
+        } else {
+            int e2 = err * 2
+            if e2 > 0 - dy { err -= dy; x0 += sx }
+            if e2 < dx { err += dx; y0 += sy }
+        }
+    }
+}
+
+def fb_diamond(int cx, int cy, int r, int col) -> void {
+    int dy = 0 - r
+    while dy <= r {
+        int ad = dy
+        if ad < 0 { ad = 0 - ad }
+        int w = r - ad
+        fb_rect(cx - w, cy + dy, w * 2 + 1, 1, col)
+        dy += 1
+    }
+}
+
+// Треугольник: dir = 1 — остриё справа, dir = -1 — остриё слева.
+def fb_tri(int x, int y, int w, int h, int dir, int col) -> void {
+    int i = 0
+    while i < w {
+        int hh = (i + 1) * h / w
+        int top = y + (h - hh) / 2
+        if dir == 1 {
+            fb_rect(x + w - 1 - i, top, 1, hh, col)
+        } else {
+            fb_rect(x + i, top, 1, hh, col)
+        }
+        i += 1
+    }
+}
+
+def fb_glyph(int gi, int x, int y, int col, int sc) -> void {
+    if gi < 0 { return }
+    if gi >= FONTN { return }
+    int row = 0
+    while row < 7 {
+        int bits = FONT[gi * 7 + row]
+        int ci = 0
+        while ci < 5 {
+            if bits & (16 >> ci) {
+                if sc == 1 {
+                    fb_px(x + ci, y + row, col)
+                } else {
+                    fb_rect(x + ci * sc, y + row * sc, sc, sc, col)
+                }
+            }
+            ci += 1
+        }
+        row += 1
+    }
+}
+
+def text_w(str s, int sc) -> int {
+    int n = len(s)
+    if n <= 0 { return 0 }
+    return n * 6 * sc - sc
+}
+
+def fb_text(int x, int y, str s, int col, int sc) -> void {
+    int i = 0
+    int n = len(s)
+    int cx = x
+    while i < n {
+        int ch = (int)s[i]
+        fb_glyph(glyph_index(ch), cx, y, col, sc)
+        cx += 6 * sc
+        i += 1
+    }
+}
+
+// Текст обрезается по правой границе xmax: длинные строки (имя проекта,
+// текст слоя) не должны залезать на соседнюю область окна.
+def fb_text_clip(int x, int y, str s, int col, int sc, int xmax) -> void {
+    int n = len(s)
+    int cell = 6 * sc
+    int room = (xmax - x) / cell
+    if room <= 0 { return }
+    if n <= room {
+        fb_text(x, y, s, col, sc)
+        return
+    }
+    int i = 0
+    int cx = x
+    while i < room - 2 {
+        fb_glyph(glyph_index((int)s[i]), cx, y, col, sc)
+        cx += cell
+        i += 1
+    }
+    fb_text(cx, y, "..", col, sc)
+}
+
+// ── Мелкие помощники состояния ───────────────────────────────────────────
+
+def say(str s) -> void {
+    snprintf((str)g_msg, 128, "%s", s)
+    g_msg_t = 160
+    g_dirty = 1
+}
+
+def layer_at(int i) -> ptr/Layer {
+    if i < 0 { return &g_c.layers[0] }
+    if i >= MAXL { return &g_c.layers[MAXL - 1] }
+    return &g_c.layers[i]
+}
+
+def ease_at(ptr/Layer L, int f) -> int {
+    int i = key_near(L, (float)f)
+    if i >= 0 { return L->keys[i].ease }
+    return E_SMOOTH
+}
+
+def set_frame(int f) -> void {
+    if f < 0 { f = 0 }
+    if f > g_c.dur - 1 { f = g_c.dur - 1 }
+    if f != g_frame {
+        g_frame = f
+        g_dirty = 1
+    }
+}
+
+def rows_fit() -> int {
+    return LIST_H / ROW_H
+}
+
+def tl_rows() -> int {
+    return (WIN_H - 4 - (TL_Y + RULER_H) - 2) / ROW_H
+}
+
+def sel_layer(int i) -> void {
+    if g_c.nlay <= 0 {
+        g_c.sel = -1
+        return
+    }
+    if i < 0 { i = 0 }
+    if i >= g_c.nlay { i = g_c.nlay - 1 }
+    g_c.sel = i
+    if i < g_lrow { g_lrow = i }
+    if i >= g_lrow + rows_fit() { g_lrow = i - rows_fit() + 1 }
+    if i < g_trow { g_trow = i }
+    if i >= g_trow + tl_rows() { g_trow = i - tl_rows() + 1 }
+    if g_lrow < 0 { g_lrow = 0 }
+    if g_trow < 0 { g_trow = 0 }
+    g_dirty = 1
+}
+
+// ── Правки: любое изменение позы ставит ключ в текущем кадре ─────────────
+
+def put_pose(ptr/Layer L, ptr/Pose p) -> void {
+    if key_put(L, (float)g_frame, p, ease_at(L, g_frame)) < 0 {
+        say("KEYFRAME LIMIT REACHED")
+    }
+    g_dirty = 1
+}
+
+def nudge_pos(float dx, float dy) -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    p.x += dx
+    p.y += dy
+    put_pose(L, &p)
+}
+
+def nudge_scale(float k) -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    p.sx = p.sx * k
+    p.sy = p.sy * k
+    if p.sx < 0.5 { p.sx = 0.5 }
+    if p.sy < 0.5 { p.sy = 0.5 }
+    put_pose(L, &p)
+}
+
+def nudge_rot(float d) -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    p.rot += d
+    put_pose(L, &p)
+}
+
+def nudge_alpha(float d) -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    p.alpha = clampf(p.alpha + d, 0.0, 1.0)
+    put_pose(L, &p)
+}
+
+def key_now() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    if key_put(L, (float)g_frame, &p, E_SMOOTH) < 0 {
+        say("KEYFRAME LIMIT REACHED")
+    } else {
+        say("KEYFRAME SET")
+    }
+    g_dirty = 1
+}
+
+def key_drop() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    if key_del(L, (float)g_frame) == 1 {
+        say("KEYFRAME DELETED")
+    } else {
+        say("NO KEYFRAME AT THIS FRAME")
+    }
+    g_dirty = 1
+}
+
+def cycle_blend() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    L->blend += 1
+    if L->blend > B_SCR { L->blend = B_NORM }
+    say(blend_name(L->blend))
+    g_dirty = 1
+}
+
+def cycle_ease() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    int i = key_near(L, (float)g_frame)
+    if i < 0 {
+        Pose p
+        pose_at(L, (float)g_frame, &p)
+        i = key_put(L, (float)g_frame, &p, E_LIN)
+        if i < 0 { say("KEYFRAME LIMIT REACHED"); return }
+    }
+    L->keys[i].ease += 1
+    if L->keys[i].ease > E_HOLD { L->keys[i].ease = E_LIN }
+    say(ease_name(L->keys[i].ease))
+    g_dirty = 1
+}
+
+def toggle_visible() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    if L->visible == 1 { L->visible = 0 } else { L->visible = 1 }
+    g_dirty = 1
+}
+
+def cycle_color() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    g_pal += 1
+    if g_pal >= PALN { g_pal = 0 }
+    L->color = PAL[g_pal]
+    L->color2 = PAL[(g_pal + 4) % PALN]
+    g_dirty = 1
+}
+
+def add_layer(int kind) -> void {
+    int i = comp_add(&g_c, kind)
+    if i < 0 {
+        say("LAYER LIMIT 32")
+        return
+    }
+    ptr/Layer L = &g_c.layers[i]
+    if kind == K_TEXT {
+        layer_text(L, "TEXT")
+        text_fit(L, 24.0)
+    }
+    g_frame = 0
+    sel_layer(i)
+    say(layer_name(kind))
+}
+
+def del_layer() -> void {
+    if g_c.sel < 0 { return }
+    comp_remove(&g_c, g_c.sel)
+    if g_c.nlay > 0 { sel_layer(g_c.sel) } else { g_c.sel = -1 }
+    g_dirty = 1
+}
+
+def start_text_edit() -> void {
+    if g_c.sel < 0 { return }
+    ptr/Layer L = layer_at(g_c.sel)
+    if L->kind != K_TEXT { say("ONLY FOR TEXT LAYERS"); return }
+    g_tlen = L->ntext
+    int i = 0
+    while i < g_tlen {
+        g_tbuf[i] = L->text[i]
+        i += 1
+    }
+    g_tbuf[g_tlen] = 0
+    g_tedit = 1
+    g_dirty = 1
+}
+
+def commit_text_edit() -> void {
+    if g_tedit == 0 { return }
+    g_tedit = 0
+    g_tbuf[g_tlen] = 0
+    if g_c.sel >= 0 {
+        ptr/Layer L = layer_at(g_c.sel)
+        layer_text(L, (str)g_tbuf)
+        text_fit(L, 24.0)
+        say("TEXT UPDATED")
+    }
+    g_dirty = 1
+}
+
+def save_project() -> void {
+    if proj_save(&g_c, g_path) == 0 {
+        say("SAVED")
+    } else {
+        say("SAVE FAILED")
+    }
+}
+
+// ── Отрисовка: шапка ─────────────────────────────────────────────────────
+
+def draw_button(int x, int y, int w, int h, int col) -> void {
+    fb_rect(x, y, w, h, TH_ROW)
+    fb_frame(x, y, w, h, col)
+}
+
+def draw_header() -> void {
+    fb_rect(0, 0, WIN_W, HDR_H, TH_HEAD)
+    fb_rect(0, HDR_H - 1, WIN_W, 1, TH_LINE)
+    fb_text(14, 12, "LUMOTION", TH_ACC, 2)
+
+    // транспорт: в начало, играть/пауза, в конец
+    int i = 0
+    while i < 3 {
+        int bx = TB_X + i * (TB_W + 4)
+        int hl = TH_DIM
+        if i == 1 and g_play == 1 { hl = TH_ACC }
+        draw_button(bx, TB_Y, TB_W, TB_H, hl)
+        if i == 0 {
+            fb_rect(bx + 8, TB_Y + 6, 2, TB_H - 12, TH_TEXT)
+            fb_tri(bx + 12, TB_Y + 6, 10, TB_H - 12, -1, TH_TEXT)
+        }
+        if i == 1 {
+            if g_play == 1 {
+                fb_rect(bx + 10, TB_Y + 6, 3, TB_H - 12, TH_ACC)
+                fb_rect(bx + 17, TB_Y + 6, 3, TB_H - 12, TH_ACC)
+            } else {
+                fb_tri(bx + 11, TB_Y + 6, 10, TB_H - 12, 1, TH_TEXT)
+            }
+        }
+        if i == 2 {
+            fb_tri(bx + 9, TB_Y + 6, 10, TB_H - 12, 1, TH_TEXT)
+            fb_rect(bx + 21, TB_Y + 6, 2, TB_H - 12, TH_TEXT)
+        }
+        i += 1
+    }
+
+    byte buf[128]
+    float sec = (float)g_frame / (float)g_c.fps
+    snprintf((str)buf, 128, "FRAME %03d / %d   %.2f S", g_frame, g_c.dur, sec)
+    fb_text(410, 16, (str)buf, TH_TEXT, 1)
+
+    snprintf((str)buf, 128, "%d X %d   %d FPS", g_c.w, g_c.h, g_c.fps)
+    fb_text(640, 16, (str)buf, TH_DIM, 1)
+
+    // кнопка сохранения
+    int sx = WIN_W - 96
+    draw_button(sx, TB_Y, 78, TB_H, TH_DIM)
+    fb_text(sx + 12, 16, "SAVE", TH_TEXT, 1)
+
+    // имя проекта
+    fb_text_clip(410, 4, g_c.name, TH_ACC2, 1, WIN_W - 104)
+}
+
+// ── Отрисовка: превью ────────────────────────────────────────────────────
+
+def draw_preview() -> void {
+    int pw = g_c.w
+    int ph = g_c.h
+    render_frame(&g_c, g_frame, g_rgb)
+
+    int y = 0
+    while y < ph {
+        int base = (g_pvy + y) * WIN_W + g_pvx
+        int o = y * pw * 3
+        int x = 0
+        while x < pw {
+            g_fb[base + x] = ((int)g_rgb[o] << 16) | ((int)g_rgb[o + 1] << 8) | (int)g_rgb[o + 2]
+            o += 3
+            x += 1
+        }
+        y += 1
+    }
+    fb_frame(g_pvx - 1, g_pvy - 1, pw + 2, ph + 2, TH_LINE)
+    if g_c.sel >= 0 { draw_sel_box() }
+}
+
+def draw_sel_box() -> void {
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    if p.sx < 0.2 { return }
+    if p.sy < 0.2 { return }
+    float ca = cos(p.rot)
+    float sa = sin(p.rot)
+    float xs[4]
+    float ys[4]
+    int k = 0
+    while k < 4 {
+        float ux = -1.0
+        float uy = -1.0
+        if k == 1 { ux = 1.0 }
+        if k == 2 { ux = 1.0; uy = 1.0 }
+        if k == 3 { uy = 1.0 }
+        xs[k] = (float)g_pvx + p.x + ux * p.sx * ca - uy * p.sy * sa
+        ys[k] = (float)g_pvy + p.y + ux * p.sx * sa + uy * p.sy * ca
+        k += 1
+    }
+    fb_line((int)xs[0], (int)ys[0], (int)xs[1], (int)ys[1], TH_ACC)
+    fb_line((int)xs[1], (int)ys[1], (int)xs[2], (int)ys[2], TH_ACC)
+    fb_line((int)xs[2], (int)ys[2], (int)xs[3], (int)ys[3], TH_ACC)
+    fb_line((int)xs[3], (int)ys[3], (int)xs[0], (int)ys[0], TH_ACC)
+}
+
+def draw_canvas() -> void {
+    fb_rect(0, HDR_H, CAN_W, TL_Y - HDR_H, TH_CANVAS)
+    byte buf[128]
+    snprintf((str)buf, 128, "COMPOSITION  %d X %d", g_c.w, g_c.h)
+    fb_text(g_pvx, g_pvy - 16, (str)buf, TH_DIM, 1)
+    if g_c.sel >= 0 {
+        snprintf((str)buf, 128, "LAYER %d/%d", g_c.sel + 1, g_c.nlay)
+        fb_text(g_pvx + 640 - text_w((str)buf, 1), g_pvy - 16, (str)buf, TH_DIM, 1)
+    }
+    draw_preview()
+    // строка состояния под превью
+    int sy = g_pvy + g_c.h + 12
+    if g_tedit == 1 {
+        fb_text(g_pvx, sy, "EDIT TEXT:", TH_ACC, 1)
+        fb_text(g_pvx + 76, sy, (str)g_tbuf, TH_TEXT, 1)
+        fb_rect(g_pvx + 76 + text_w((str)g_tbuf, 1) + 2, sy, 6, 8, TH_ACC)
+        fb_text(g_pvx, sy + 14, "ENTER COMMITS, ESC CANCELS, BACKSPACE DELETES", TH_DIM, 1)
+    } elif g_msg_t > 0 {
+        fb_text(g_pvx, sy, (str)g_msg, TH_ACC2, 1)
+    } else {
+        fb_text(g_pvx, sy, "CLICK TO SELECT, DRAG TO MOVE, ARROWS STEP FRAMES", TH_DIM, 1)
+    }
+}
+
+// ── Отрисовка: панель слоёв и инспектор ──────────────────────────────────
+
+def layer_mark(int kind) -> int {
+    if kind == K_TEXT { return TH_ACC }
+    if kind == K_GRAD { return TH_BLUE }
+    if kind == K_GLOW { return TH_ACC2 }
+    if kind == K_ELL { return TH_GREEN }
+    return TH_TEXT
+}
+
+def draw_panel() -> void {
+    fb_rect(PANEL_X, HDR_H, PANEL_W, TL_Y - HDR_H, TH_PANEL)
+    fb_rect(PANEL_X, HDR_H, 1, TL_Y - HDR_H, TH_LINE)
+
+    byte buf[128]
+    fb_text(PANEL_X + 12, HDR_H + 10, "LAYERS", TH_DIM, 1)
+    snprintf((str)buf, 128, "%d/%d", g_c.nlay, MAXL)
+    fb_text(PANEL_X + PANEL_W - 12 - text_w((str)buf, 1), HDR_H + 10, (str)buf, TH_DIM, 1)
+
+    int fit = rows_fit()
+    int i = g_lrow
+    while i < g_c.nlay and i < g_lrow + fit {
+        int ry = LIST_Y0 + (i - g_lrow) * ROW_H
+        int bg = TH_ROW
+        if i == g_c.sel { bg = TH_ROW_SEL }
+        fb_rect(PANEL_X + 1, ry, PANEL_W - 1, ROW_H, bg)
+        fb_rect(PANEL_X + 8, ry + 6, 4, 8, layer_mark(g_c.layers[i].kind))
+        snprintf((str)buf, 128, "%.2d %s", i + 1, layer_name(g_c.layers[i].kind))
+        fb_text(PANEL_X + 18, ry + 6, (str)buf, TH_TEXT, 1)
+        snprintf((str)buf, 128, "%d", g_c.layers[i].nkeys)
+        fb_text(PANEL_X + PANEL_W - 28, ry + 6, (str)buf, TH_DIM, 1)
+        if g_c.layers[i].visible == 1 {
+            fb_rect(PANEL_X + PANEL_W - 14, ry + 8, 6, 5, TH_GREEN)
+        } else {
+            fb_frame(PANEL_X + PANEL_W - 14, ry + 8, 6, 5, TH_LINE)
+        }
+        i += 1
+    }
+    // полоса прокрутки списка
+    if g_c.nlay > fit {
+        int track_y = LIST_Y0
+        int total = fit * ROW_H
+        fb_rect(PANEL_X + PANEL_W - 3, track_y, 3, total, TH_HEAD)
+        int hh = total * fit / g_c.nlay
+        if hh < 8 { hh = 8 }
+        int yy = track_y + (total - hh) * g_lrow / (g_c.nlay - fit + 1)
+        fb_rect(PANEL_X + PANEL_W - 3, yy, 3, hh, TH_DIM)
+    }
+
+    fb_rect(PANEL_X, INSP_Y, PANEL_W, 1, TH_LINE)
+    fb_text(PANEL_X + 12, INSP_Y + 10, "INSPECTOR", TH_DIM, 1)
+    if g_c.sel < 0 {
+        fb_text(PANEL_X + 12, INSP_Y + 34, "NO LAYER SELECTED", TH_DIM, 1)
+        return
+    }
+
+    ptr/Layer L = layer_at(g_c.sel)
+    Pose p
+    pose_at(L, (float)g_frame, &p)
+    int y = INSP_Y + 32
+
+    fb_text(PANEL_X + 12, y, layer_name(L->kind), layer_mark(L->kind), 1)
+    snprintf((str)buf, 128, "KEY %d/%d", key_near(L, (float)g_frame) + 1, L->nkeys)
+    fb_text(PANEL_X + PANEL_W - 12 - text_w((str)buf, 1), y, (str)buf, TH_DIM, 1)
+
+    y += 22
+    fb_text(PANEL_X + 12, y, "BLEND", TH_DIM, 1)
+    fb_text(PANEL_X + 110, y, blend_name(L->blend), TH_TEXT, 1)
+    y += 18
+    fb_text(PANEL_X + 12, y, "POS", TH_DIM, 1)
+    snprintf((str)buf, 128, "%.1f  %.1f", p.x, p.y)
+    fb_text(PANEL_X + 110, y, (str)buf, TH_TEXT, 1)
+    y += 18
+    fb_text(PANEL_X + 12, y, "SCALE", TH_DIM, 1)
+    snprintf((str)buf, 128, "%.1f  %.1f", p.sx, p.sy)
+    fb_text(PANEL_X + 110, y, (str)buf, TH_TEXT, 1)
+    y += 18
+    fb_text(PANEL_X + 12, y, "ROT", TH_DIM, 1)
+    snprintf((str)buf, 128, "%.2f", p.rot)
+    fb_text(PANEL_X + 110, y, (str)buf, TH_TEXT, 1)
+    y += 18
+    fb_text(PANEL_X + 12, y, "ALPHA", TH_DIM, 1)
+    snprintf((str)buf, 128, "%.2f", p.alpha)
+    fb_text(PANEL_X + 110, y, (str)buf, TH_TEXT, 1)
+    y += 18
+    fb_text(PANEL_X + 12, y, "COLOR", TH_DIM, 1)
+    fb_rect(PANEL_X + 110, y, 10, 8, L->color)
+    snprintf((str)buf, 128, "#%06X", L->color)
+    fb_text(PANEL_X + 126, y, (str)buf, TH_TEXT, 1)
+    y += 18
+    fb_text(PANEL_X + 12, y, "EASE", TH_DIM, 1)
+    int ei = key_near(L, (float)g_frame)
+    if ei >= 0 { fb_text(PANEL_X + 110, y, ease_name(L->keys[ei].ease), TH_TEXT, 1) }
+    else { fb_text(PANEL_X + 110, y, "-", TH_DIM, 1) }
+    y += 18
+    if L->kind == K_TEXT {
+        fb_text(PANEL_X + 12, y, "TEXT", TH_DIM, 1)
+        fb_text_clip(PANEL_X + 110, y, (str)L->text, TH_TEXT, 1, PANEL_X + PANEL_W - 12)
+        y += 18
+    }
+
+    // подсказки по клавишам
+    int hy = TL_Y - 96
+    fb_rect(PANEL_X + 1, hy - 10, PANEL_W - 1, 1, TH_LINE)
+    fb_text(PANEL_X + 12, hy, "SPACE PLAY   A/D W/S MOVE", TH_DIM, 1)
+    fb_text(PANEL_X + 12, hy + 14, "-/= SCALE   ,/. ROT   9/0 ALPHA", TH_DIM, 1)
+    fb_text(PANEL_X + 12, hy + 28, "K KEY   DEL KEY   E EASE   B BLEND", TH_DIM, 1)
+    fb_text(PANEL_X + 12, hy + 42, "T TEXT   C COLOR   V VISIBLE   X LAYER", TH_DIM, 1)
+    fb_text(PANEL_X + 12, hy + 56, "1-5 ADD   S SAVE   ESC QUIT", TH_DIM, 1)
+}
+
+// ── Отрисовка: таймлайн ──────────────────────────────────────────────────
+
+def f2x(int f) -> int {
+    int span = g_c.dur - 1
+    if span < 1 { span = 1 }
+    return TX0 + f * (TX1 - TX0) / span
+}
+
+def x2f(int x) -> int {
+    int span = g_c.dur - 1
+    if span < 1 { span = 1 }
+    int f = (x - TX0) * span / (TX1 - TX0)
+    if f < 0 { f = 0 }
+    if f > span { f = span }
+    return f
+}
+
+def draw_timeline() -> void {
+    fb_rect(0, TL_Y, WIN_W, WIN_H - TL_Y, TH_HEAD)
+    fb_rect(0, TL_Y, WIN_W, 1, TH_LINE)
+
+    byte buf[64]
+    fb_text(10, TL_Y + 5, "TIMELINE", TH_DIM, 1)
+    snprintf((str)buf, 64, "%d LAYERS", g_c.nlay)
+    fb_text(LAB_W - 8 - text_w((str)buf, 1), TL_Y + 5, (str)buf, TH_DIM, 1)
+
+    // линейка: тики каждые 5 кадров, подписи каждые 30
+    int f = 0
+    while f < g_c.dur {
+        int x = f2x(f)
+        fb_rect(x, TL_Y + RULER_H - 5, 1, 5, TH_LINE)
+        f += 5
+    }
+    f = 0
+    while f <= g_c.dur {
+        int lx = f2x(f)
+        fb_rect(lx, TL_Y + 2, 1, RULER_H - 3, TH_LINE)
+        if f < g_c.dur {
+            snprintf((str)buf, 64, "%d", f)
+            fb_text(lx + 2, TL_Y + 3, (str)buf, TH_DIM, 1)
+        }
+        f += 30
+    }
+
+    int fit = tl_rows()
+    int i = g_trow
+    while i < g_c.nlay and i < g_trow + fit {
+        int ry = TL_Y + RULER_H + (i - g_trow) * ROW_H
+        int bg = TH_HEAD
+        if i == g_c.sel { bg = TH_ROW_SEL }
+        fb_rect(0, ry, LAB_W, ROW_H, bg)
+        fb_rect(TX0 - 6, ry, WIN_W - TX0 + 6, ROW_H, bg)
+        fb_rect(TX0 - 6, ry + ROW_H - 1, WIN_W - TX0 + 6, 1, TH_PANEL)
+        fb_rect(6, ry + 6, 3, 8, layer_mark(g_c.layers[i].kind))
+        snprintf((str)buf, 64, "%.2d %s", i + 1, layer_name(g_c.layers[i].kind))
+        fb_text(14, ry + 6, (str)buf, TH_TEXT, 1)
+
+        int k = 0
+        while k < g_c.layers[i].nkeys {
+            int kx = f2x((int)g_c.layers[i].keys[k].t)
+            int kc = TH_DIM
+            if i == g_c.sel { kc = TH_ACC }
+            if (int)g_c.layers[i].keys[k].t == g_frame { kc = TH_TEXT }
+            fb_diamond(kx, ry + ROW_H / 2, 3, kc)
+            k += 1
+        }
+        i += 1
+    }
+
+    // плейхед
+    int px = f2x(g_frame)
+    fb_rect(px, TL_Y + RULER_H - 1, 1, WIN_H - TL_Y - RULER_H + 1, TH_ACC2)
+    fb_diamond(px, TL_Y + RULER_H - 4, 4, TH_ACC2)
+}
+
+// ── События ──────────────────────────────────────────────────────────────
+
+def in_rect(int mx, int my, int x, int y, int w, int h) -> bool {
+    if mx < x { return false }
+    if my < y { return false }
+    if mx >= x + w { return false }
+    if my >= y + h { return false }
+    return true
+}
+
+def on_click(int mx, int my) -> void {
+    // транспорт и сохранение в шапке
+    if my < HDR_H {
+        int i = 0
+        while i < 3 {
+            int bx = TB_X + i * (TB_W + 4)
+            if in_rect(mx, my, bx, TB_Y, TB_W, TB_H) {
+                if i == 0 { set_frame(0) }
+                if i == 1 { if g_play == 1 { g_play = 0 } else { g_play = 1 } g_dirty = 1 }
+                if i == 2 { set_frame(g_c.dur - 1) }
+                return
+            }
+            i += 1
+        }
+        if in_rect(mx, my, WIN_W - 96, TB_Y, 78, TB_H) {
+            save_project()
+            return
+        }
+        return
+    }
+
+    // превью: выбор и перетаскивание
+    if my >= g_pvy and my < g_pvy + g_c.h and mx >= g_pvx and mx < g_pvx + g_c.w {
+        int hit = comp_hit(&g_c, g_frame, (float)(mx - g_pvx), (float)(my - g_pvy))
+        if hit >= 0 {
+            sel_layer(hit)
+            ptr/Layer L = layer_at(hit)
+            pose_at(L, (float)g_frame, &g_drag_pose)
+            g_drag_px = (float)(mx - g_pvx)
+            g_drag_py = (float)(my - g_pvy)
+            g_drag = 1
+        }
+        return
+    }
+
+    // список слоёв
+    if mx >= PANEL_X and my >= LIST_Y0 and my < LIST_Y0 + LIST_H {
+        int row = g_lrow + (my - LIST_Y0) / ROW_H
+        if row < g_c.nlay { sel_layer(row) }
+        return
+    }
+
+    // таймлайн
+    if my >= TL_Y + RULER_H {
+        int trow = g_trow + (my - (TL_Y + RULER_H)) / ROW_H
+        if mx < LAB_W {
+            if trow < g_c.nlay { sel_layer(trow) }
+            return
+        }
+        if trow < g_c.nlay {
+            sel_layer(trow)
+            // ближайший ключ выбранного слоя в пределах 6 px
+            ptr/Layer Lt = layer_at(trow)
+            int k = 0
+            while k < Lt->nkeys {
+                int kx = f2x((int)Lt->keys[k].t)
+                if mx >= kx - 6 and mx <= kx + 6 {
+                    set_frame((int)Lt->keys[k].t)
+                    g_scrub = 1
+                    return
+                }
+                k += 1
+            }
+        }
+        set_frame(x2f(mx))
+        g_scrub = 1
+        return
+    }
+    if my >= TL_Y {
+        set_frame(x2f(mx))
+        g_scrub = 1
+    }
+}
+
+def on_motion(int mx, int my) -> void {
+    if g_scrub == 1 {
+        set_frame(x2f(mx))
+        return
+    }
+    if g_drag == 1 and g_c.sel >= 0 {
+        ptr/Layer L = layer_at(g_c.sel)
+        Pose p
+        pose_at(L, (float)g_frame, &p)
+        p.x = g_drag_pose.x + (float)(mx - g_pvx) - g_drag_px
+        p.y = g_drag_pose.y + (float)(my - g_pvy) - g_drag_py
+        key_put(L, (float)g_frame, &p, ease_at(L, g_frame))
+        g_dirty = 1
+    }
+}
+
+def on_release() -> void {
+    g_scrub = 0
+    g_drag = 0
+}
+
+def on_key(long k) -> void {
+    if g_tedit == 1 {
+        if k == 65293 or k == 65288 {
+            if k == 65293 { commit_text_edit() } else {
+                if g_tlen > 0 { g_tlen -= 1 }
+                g_tbuf[g_tlen] = 0
+                g_dirty = 1
+            }
+            return
+        }
+        if k == 65307 {
+            g_tedit = 0
+            say("TEXT EDIT CANCELLED")
+            g_dirty = 1
+            return
+        }
+        if k >= 32 and k <= 126 and g_tlen < 94 {
+            g_tbuf[g_tlen] = (byte)k
+            g_tlen += 1
+            g_tbuf[g_tlen] = 0
+            g_dirty = 1
+        }
+        return
+    }
+
+    if k == 65307 { g_running = 0; return }
+    if k == 32 {
+        if g_play == 1 { g_play = 0 } else { g_play = 1 }
+        g_dirty = 1
+        return
+    }
+    if k == 65361 { set_frame(g_frame - 1); return }
+    if k == 65363 { set_frame(g_frame + 1); return }
+    if k == 65360 { set_frame(0); return }
+    if k == 65367 { set_frame(g_c.dur - 1); return }
+    if k == 65362 { sel_layer(g_c.sel - 1); return }
+    if k == 65364 { sel_layer(g_c.sel + 1); return }
+    if k == 65535 or k == 65288 { key_drop(); return }
+    if k == 97 { nudge_pos(-4.0, 0.0); return }
+    if k == 100 { nudge_pos(4.0, 0.0); return }
+    if k == 119 { nudge_pos(0.0, -4.0); return }
+    if k == 115 { save_project(); return }
+    if k == 120 { del_layer(); return }
+    if k == 118 { toggle_visible(); return }
+    if k == 98 { cycle_blend(); return }
+    if k == 101 { cycle_ease(); return }
+    if k == 107 { key_now(); return }
+    if k == 116 { start_text_edit(); return }
+    if k == 99 { cycle_color(); return }
+    if k == 49 { add_layer(K_RECT); return }
+    if k == 50 { add_layer(K_ELL); return }
+    if k == 51 { add_layer(K_TEXT); return }
+    if k == 52 { add_layer(K_GRAD); return }
+    if k == 53 { add_layer(K_GLOW); return }
+    if k == 45 { nudge_scale(0.92); return }
+    if k == 61 { nudge_scale(1.0 / 0.92); return }
+    if k == 44 { nudge_rot(-0.06); return }
+    if k == 46 { nudge_rot(0.06); return }
+    if k == 57 { nudge_alpha(-0.05); return }
+    if k == 48 { nudge_alpha(0.05); return }
+}
+
+// ── Главный цикл ─────────────────────────────────────────────────────────
+
+def draw_all() -> void {
+    fb_rect(0, 0, WIN_W, WIN_H, TH_BG)
+    draw_header()
+    draw_canvas()
+    draw_panel()
+    draw_timeline()
+}
+
+def main() -> void {
+    ptr/Display d = XOpenDisplay(0)
+    if d == 0 {
+        printf("lumotion: cannot open X display (check DISPLAY)\n")
+        return
+    }
+    int scr = DefaultScreen(d)
+    Window win = XCreateSimpleWindow(d, RootWindow(d, scr), 40, 40, WIN_W, WIN_H, 1, 0, 0)
+    GC gc = XCreateGC(d, win, 0, 0)
+    XStoreName(d, win, "LuMotion")
+    XSelectInput(d, win, ExposureMask | ButtonPressMask | ButtonReleaseMask | PointerMotionMask | ButtonMotionMask | KeyPressMask | StructureNotifyMask)
+    Atom wm_del = XInternAtom(d, "WM_DELETE_WINDOW", False)
+    XSetWMProtocols(d, win, &wm_del, 1)
+    XMapWindow(d, win)
+
+    g_d = d
+    g_win = win
+    g_gc = gc
+
+    theme_init()
+    comp_init(&g_c, 640, 360, 30, 150)
+    comp_demo(&g_c)
+    if __luc_argc >= 2 {
+        if proj_load(&g_c, __luc_argv[1]) == 0 {
+            g_path = __luc_argv[1]
+        } else {
+            printf("lumotion: cannot read '%s', using demo scene\n", __luc_argv[1])
+            comp_demo(&g_c)
+        }
+    }
+
+    g_pvx = (CAN_W - g_c.w) / 2
+    g_pvy = HDR_H + ((TL_Y - HDR_H) - g_c.h) / 2
+    if g_pvx < 4 { g_pvx = 4 }
+    if g_pvy < HDR_H + 20 { g_pvy = HDR_H + 20 }
+
+    g_rgb = malloc(g_c.w * g_c.h * 3)
+    g_fb = malloc(WIN_W * WIN_H * 4)
+    if g_rgb == 0 or g_fb == 0 {
+        printf("lumotion: out of memory\n")
+        return
+    }
+    g_img = XCreateImage(d, DefaultVisual(d, scr), 24, ZPixmap, 0, (str)g_fb, WIN_W, WIN_H, 32, 0)
+    if g_img == 0 {
+        printf("lumotion: cannot create X image\n")
+        return
+    }
+    sel_layer(g_c.sel)
+    say("READY")
+
+    int64 last = now_ms()
+    while g_running == 1 {
+        int pending = XPending(d)
+        while pending > 0 {
+            XEvent ev
+            XNextEvent(d, &ev)
+            if ev.type == Expose {
+                g_dirty = 1
+            } elif ev.type == KeyPress {
+                int kcol = 0
+                if ev.xkey.state & 1 { kcol = 1 }
+                on_key(XLookupKeysym(&ev.xkey, kcol))
+            } elif ev.type == ButtonPress {
+                if ev.xbutton.button == 4 {
+                    if g_trow > 0 { g_trow -= 1 }
+                    if g_lrow > 0 { g_lrow -= 1 }
+                    g_dirty = 1
+                } elif ev.xbutton.button == 5 {
+                    if g_trow + tl_rows() < g_c.nlay { g_trow += 1 }
+                    if g_lrow + rows_fit() < g_c.nlay { g_lrow += 1 }
+                    g_dirty = 1
+                } else {
+                    on_click(ev.xbutton.x, ev.xbutton.y)
+                }
+            } elif ev.type == ButtonRelease {
+                on_release()
+            } elif ev.type == MotionNotify {
+                on_motion(ev.xmotion.x, ev.xmotion.y)
+            } elif ev.type == ClientMessage {
+                if ev.xclient.data.l[0] == (long)wm_del { g_running = 0 }
+            }
+            pending = XPending(d)
+        }
+
+        if g_play == 1 {
+            int step = 1000 / g_c.fps
+            if step < 1 { step = 1 }
+            int64 now = now_ms()
+            int64 dt = now - last
+            if dt >= step {
+                int adv = (int)(dt / step)
+                last = now
+                int nf = g_frame + adv
+                while nf > g_c.dur - 1 { nf -= g_c.dur }
+                g_frame = nf
+                g_dirty = 1
+            }
+        } else {
+            last = now_ms()
+        }
+
+        if g_msg_t > 0 {
+            g_msg_t -= 1
+            if g_msg_t == 0 { g_dirty = 1 }
+        }
+
+        if g_dirty == 1 {
+            draw_all()
+            XPutImage(d, win, gc, g_img, 0, 0, 0, 0, WIN_W, WIN_H)
+            XFlush(d)
+            g_dirty = 0
+        }
+        sleep_ms(6)
+    }
+
+    XDestroyImage(g_img)
+    XFreeGC(d, gc)
+    XCloseDisplay(d)
+}
