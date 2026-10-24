@@ -1,0 +1,8 @@
+Lu/Strict
+// v5 unit pulling in a Classic unit: included files must also be v5.
+incl <classiclib>
+
+fn main() -> int {
+    Pr(classic_fn())
+    ret 0
+}

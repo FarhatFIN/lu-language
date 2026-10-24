@@ -1,0 +1,9 @@
+Lu/Language
+// a includes b, b includes a back: the cycle must terminate (include-once),
+// not hang.
+incl <a>
+
+fn main() -> int {
+    print(f() + g())
+    return 0
+}

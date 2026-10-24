@@ -9,13 +9,14 @@
 #include <fcntl.h>
 #include <unistd.h>
 
-#define LUC_VERSION "4.6"
+#define LUC_VERSION "4.7"
+#define LUC_GENERATIONS "Lu v5 canonical; Lu Classic frozen"
 
 typedef enum { BACKEND_AUTO = -1, BACKEND_C = 0, BACKEND_NATIVE = 1 } Backend;
 
 static void usage(const char *prog) {
     fprintf(stderr,
-        "Lu Compiler  v" LUC_VERSION "\n"
+        "Lu Compiler  v" LUC_VERSION " (" LUC_GENERATIONS ")\n"
         "Usage: %s [options] <source.lu>\n\n"
         "Options:\n"
         "  -n           Native backend: emit a static x86-64 ELF (default)\n"
@@ -159,7 +160,7 @@ int main(int argc, char **argv) {
         case 'a': dump_ast = true; break;
         case 's': stats    = true; break;
         case 'v':
-            fprintf(stdout, "luc (Lu Compiler) v" LUC_VERSION "\n");
+            fprintf(stdout, "luc " LUC_VERSION " (" LUC_GENERATIONS ")\n");
             return 0;
         case 'h': usage(argv[0]); return 0;
         default:  usage(argv[0]); return 1;
@@ -204,7 +205,8 @@ int main(int argc, char **argv) {
 
     /* Lu/Strict (v5) sources are lowered to plain Lu text before anything
        else, so every backend accepts them without special cases. */
-    if (v5_is_strict(src)) {
+    bool src_is_v5 = v5_is_strict(src);
+    if (src_is_v5) {
         char  err[512];
         char *v4 = v5_transpile(srcpath, src, err, sizeof err);
         if (!v4) {
@@ -229,8 +231,9 @@ int main(int argc, char **argv) {
     }
 
     clock_t t0 = clock();
-    fprintf(stderr, "[luc] compiling '%s'  (O%d%s)\n",
-            srcpath, opt_lvl, debug ? " debug" : "");
+    fprintf(stderr, "[luc] compiling '%s'  (%s, O%d%s)\n",
+            srcpath, src_is_v5 ? "Lu v5" : "Lu Classic",
+            opt_lvl, debug ? " debug" : "");
 
     /* ── Lex ── */
     extern const char *g_lu_src;   /* сырой текст для asm-блоков (parser.c) */

@@ -1,0 +1,5 @@
+Lu/Strict
+
+fn twice(n: int) -> int {
+    ret n * 2
+}

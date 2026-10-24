@@ -1,0 +1,6 @@
+Lu/Language
+incl <d>
+
+fn from_a() -> int {
+    return twice(1)
+}

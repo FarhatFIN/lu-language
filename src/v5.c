@@ -17,13 +17,16 @@
  *   for i in a..b    ->  counted loop with an explicit counter
  */
 
-/* readlink() and friends live behind the POSIX 2008 feature test macro. */
+/* readlink() lives behind the POSIX 2008 feature test macro, and realpath()
+   behind XSI; both must be set before the first system header. */
+#define _XOPEN_SOURCE 700
 #define _POSIX_C_SOURCE 200809L
 
 #include "v5.h"
 #include "lu.h"
 
 #include <ctype.h>
+#include <limits.h>
 #include <stdarg.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -258,6 +261,11 @@ typedef struct {
     /* files pulled in with `incl <...>` (absolute paths, included once) */
     char **inc;
     int    ninc, cinc;
+
+    /* resolved include paths kept alive for the whole transpile: every token
+       spliced from an included file points its `file` field into one of these */
+    char **paths;
+    int    npaths, cpaths;
 
     /* loop contexts: 0 = normal, 1 = range-for with an explicit counter */
     int   loop_kind[64];
@@ -699,6 +707,31 @@ static void close_block(V5 *v)
     buf_puts(&v->out, "}");
     nl(v);
     expect_p(v, "}");
+}
+
+/* A block with no matching source brace.  Range-for lowering needs one so the
+   synthesised `__lu_stN`, loop variable and `__lu_enN` do not leak into the
+   enclosing function: two `for i in 0..n` loops would otherwise emit the same
+   C name twice.  The braces come from the lowering, not from the input, so the
+   token-consuming open_block/close_block cannot be used. */
+static void open_scope(V5 *v, int line)
+{
+    if (v->failed) return;
+    align_to(v, line);
+    flush_pre(v);
+    indent(v);
+    buf_puts(&v->out, "if true {");
+    nl(v);
+    v->depth++;
+}
+
+static void close_scope(V5 *v)
+{
+    if (v->failed) return;
+    if (v->depth > 0) v->depth--;
+    indent(v);
+    buf_puts(&v->out, "}");
+    nl(v);
 }
 
 static void stmt(V5 *v);
@@ -2078,6 +2111,8 @@ static void parse_for(V5 *v)
         adv(v);
         expr(v, &end);
 
+        open_scope(v, line);
+
         buf_printf(&out, "var __lu_st%d: int = ", id);
         buf_add(&out, first.s ? first.s : "0", first.len);
         emit_line(v, line, &out);
@@ -2117,6 +2152,7 @@ static void parse_for(V5 *v)
             v->loop_inc[v->nloop] = NULL;
             v->nloc = nloc_before;
         }
+        close_scope(v);
         free(first.s);
         free(end.s);
         return;
@@ -2527,6 +2563,27 @@ static void remember_include(V5 *v, const char *path)
     v->inc[v->ninc++] = xstrdup(path);
 }
 
+/* Include-once has to compare the same file reached by different spellings
+   (`<lib>` vs `<./lib>`), or a diamond include becomes a duplicate
+   definition.  The resolved spelling is still what diagnostics show. */
+static char *canonical_path(const char *p)
+{
+    char buf[PATH_MAX];
+    if (realpath(p, buf)) return xstrdup(buf);
+    return xstrdup(p);
+}
+
+/* Tokens spliced from an included file keep a pointer to its path; the path
+   must outlive the token stream, not just the parse_include call. */
+static void own_path(V5 *v, char *p)
+{
+    if (v->npaths == v->cpaths) {
+        v->cpaths = v->cpaths ? v->cpaths * 2 : 8;
+        v->paths = realloc(v->paths, (size_t)v->cpaths * sizeof *v->paths);
+    }
+    v->paths[v->npaths++] = p;
+}
+
 /* Insert `n` tokens starting at base[off] just after `incl <...>`; the
    whole array `base` is taken over (and released) by this call. */
 static void splice_tokens(V5 *v, Tok *base, int off, int n)
@@ -2593,55 +2650,63 @@ static void parse_include(V5 *v)
         char *full = resolve_include(from, v->path, path.s ? path.s : "");
         if (!full) {
             verr(v, line, "include file '%s' not found", path.s ? path.s : "");
-        } else if (already_included(v, full)) {
-            free(full);
         } else {
-            char *src = read_whole_file(full);
-            if (!src) {
-                verr(v, line, "cannot read include file '%s'", full);
+            char *key = canonical_path(full);
+            if (already_included(v, key)) {
+                free(key);
+                free(full);
             } else {
-                Tok *save_tk     = v->tk;
-                int  save_nt     = v->nt;
-                int  save_alloc  = v->nt_alloc;
-                int  save_pos    = v->pos;
-                const char *save_file = v->cur_file;
-                int  first;
+                char *src = read_whole_file(full);
+                if (!src) {
+                    verr(v, line, "cannot read include file '%s'", full);
+                    free(key);
+                    free(full);
+                } else {
+                    Tok *save_tk     = v->tk;
+                    int  save_nt     = v->nt;
+                    int  save_alloc  = v->nt_alloc;
+                    int  save_pos    = v->pos;
+                    const char *save_file = v->cur_file;
+                    int  first;
 
-                v->tk = NULL; v->nt = 0; v->nt_alloc = 0; v->pos = 0;
-                v->cur_file = full;
-                lex_all(v, src);
-                free(src);
+                    v->tk = NULL; v->nt = 0; v->nt_alloc = 0; v->pos = 0;
+                    v->cur_file = full;
+                    lex_all(v, src);
+                    free(src);
 
-                first = (v->nt >= 3 &&
-                         !strcmp(v->tk[0].text, "Lu") &&
-                         !strcmp(v->tk[1].text, "/") &&
-                         !strcmp(v->tk[2].text, "Strict")) ? 3 : 0;
-                if (first == 0 && !v->failed) {
-                    v->err[0] = '\0';
-                    v->failed = true;
-                    snprintf(v->err, sizeof v->err,
-                             "%s:1: error: first line must be 'Lu/Strict'", full);
+                    first = (v->nt >= 3 &&
+                             !strcmp(v->tk[0].text, "Lu") &&
+                             !strcmp(v->tk[1].text, "/") &&
+                             !strcmp(v->tk[2].text, "Strict")) ? 3 : 0;
+                    if (first == 0 && !v->failed) {
+                        v->err[0] = '\0';
+                        v->failed = true;
+                        snprintf(v->err, sizeof v->err,
+                                 "%s:1: error: first line must be 'Lu/Strict'", full);
+                    }
+
+                    {
+                        Tok *add   = v->tk;
+                        int  nadd  = v->nt - 1;   /* keep the main file's EOF */
+                        int  off   = first;
+
+                        v->tk = save_tk;
+                        v->nt = save_nt;
+                        v->nt_alloc = save_alloc;
+                        v->pos = save_pos;
+                        v->cur_file = save_file;
+
+                        if (!v->failed)
+                            splice_tokens(v, add, off, nadd - off);
+                        else
+                            free(add);
+                    }
+                    remember_include(v, key);
+                    free(key);
+                    /* spliced tokens name this file in diagnostics */
+                    own_path(v, full);
                 }
-
-                {
-                    Tok *add   = v->tk;
-                    int  nadd  = v->nt - 1;   /* keep the main file's EOF */
-                    int  off   = first;
-
-                    v->tk = save_tk;
-                    v->nt = save_nt;
-                    v->nt_alloc = save_alloc;
-                    v->pos = save_pos;
-                    v->cur_file = save_file;
-
-                    if (!v->failed)
-                        splice_tokens(v, add, off, nadd - off);
-                    else
-                        free(add);
-                }
-                remember_include(v, full);
             }
-            free(full);
         }
     }
     free(path.s);
@@ -3058,6 +3123,16 @@ int v5_is_strict(const char *src)
     return 0;
 }
 
+static void free_include_state(V5 *v)
+{
+    int i;
+
+    for (i = 0; i < v->npaths; i++) free(v->paths[i]);
+    free(v->paths);
+    for (i = 0; i < v->ninc; i++) free(v->inc[i]);
+    free(v->inc);
+}
+
 char *v5_transpile(const char *path, const char *src, char *err, size_t errcap)
 {
     V5    v;
@@ -3106,10 +3181,13 @@ char *v5_transpile(const char *path, const char *src, char *err, size_t errcap)
 
     buf_puts(&v.out, V5_PRELUDE);
 
+    free_include_state(&v);
     free(v.dir);
     return v.out.s;
 
 fail:
     if (err && errcap) snprintf(err, errcap, "%s", v.err);
+    free_include_state(&v);
+    free(v.dir);
     return NULL;
 }

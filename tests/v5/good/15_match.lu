@@ -1,0 +1,45 @@
+Lu/Strict
+
+fn label(n: int) -> str {
+    match n {
+        case 1 {
+            ret "one"
+        }
+        else {
+            ret "other"
+        }
+    }
+}
+
+fn same(a: str, b: str) -> bool {
+    match a {
+        case b {
+            ret true
+        }
+        else {
+            ret false
+        }
+    }
+}
+
+fn main() -> int {
+    Pr(label(1))
+    Pr(label(7))
+
+    vid a: str = "ab"
+    var b: str = "a"
+    set b = "ab"
+    if same(a, b) {
+        Pr("same")
+    } else {
+        Pr("diff")
+    }
+
+    vid flag: bool = true
+    match flag {
+        case true {
+            Pr("yes")
+        }
+    }
+    ret 0
+}

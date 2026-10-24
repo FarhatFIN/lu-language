@@ -1,0 +1,6 @@
+Lu/Language
+incl <a>
+
+fn g() -> int {
+    return 2
+}

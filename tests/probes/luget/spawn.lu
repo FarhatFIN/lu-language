@@ -1,0 +1,11 @@
+Lu/Strict
+// Q-02: can v5 spawn a process with an argv array through raw syscalls?
+// execve = 59.  A successful execve replaces this process (no output).
+fn main() -> int {
+    var args: ptr/byte[2]
+    set args[0] = "/bin/true"
+    set args[1] = 0
+    vid rc: int = syscall(59, "/bin/true", &args[0], 0)
+    Pr("execve failed: ", rc)
+    ret 1
+}

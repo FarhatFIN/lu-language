@@ -1,0 +1,16 @@
+Lu/Strict
+// Q-02: how deep can v5 recursion go on the native backend before the stack
+// is exhausted? Returns 0 so the result cannot overflow.
+vid DEPTH: int = 100000
+
+fn down(n: int) -> int {
+    if n == 0 {
+        ret 0
+    }
+    ret down(n - 1)
+}
+
+fn main() -> int {
+    Pr(down(DEPTH))
+    ret 0
+}

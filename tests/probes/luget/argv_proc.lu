@@ -1,0 +1,20 @@
+Lu/Strict
+// Q-02 workaround probe: argv is not exposed to v5 code, but /proc/self/cmdline
+// is readable through open(2)/read(2).  Prints argv[0] (up to the first NUL).
+fn main() -> int {
+    var buf: byte[512]
+    vid fd: int = syscall(2, "/proc/self/cmdline", 0, 0)
+    if fd < 0 {
+        Pr("open failed: ", fd)
+        ret 1
+    }
+    vid n: int = syscall(0, fd, &buf[0], 511)
+    syscall(3, fd)
+    if n <= 0 {
+        Pr("cmdline empty: ", n)
+        ret 1
+    }
+    set buf[n] = 0
+    Pr(&buf[0])
+    ret 0
+}

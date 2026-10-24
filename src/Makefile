@@ -27,16 +27,22 @@ test: $(TARGET) example.lu
 	$(CC) -O2 -std=c11 -o example_out example_out.c -lm
 	./example_out
 
+# Shipped Lu programs covered by test-all.  This is deliberately an explicit
+# list, not a glob: untracked scratch files in src/ must not break the floor.
+# calculator_gui.lu is built by `make test-gui` (it needs a display).
+TEST_PROGRAMS = example.lu kernel_advanced.lu kernel_sim.lu lu_compiler.lu \
+                messenger.lu native_demo.lu test_comprehensive.lu \
+                test_core_plus.lu test_full.lu test_paradigms.lu \
+                test_v13.lu test_v20.lu ../tests/calculator.lu \
+                ../tests/showcase.lu
+
 # Full regression pass over bundled Lu programs.
-# calculator_gui.lu is excluded: it needs an X11 display and blocks
-# waiting for events — build it with `make test-gui` instead.
 test-all: $(TARGET) test-cli test-native test-v5
 	@rm -rf .lu_test_build
 	@mkdir -p .lu_test_build
 	@set -e; \
-	for f in *.lu ../tests/*.lu; do \
+	for f in $(TEST_PROGRAMS); do \
 	        base=$$(basename $$f .lu); \
-	        if [ "$$base" = "calculator_gui" ]; then continue; fi; \
 	        echo "[LU TEST] $$f"; \
 	        ./$(TARGET) $$f -o .lu_test_build/$$base.c >/dev/null; \
 	        $(CC) -O2 -std=c11 -I. -I../include -o .lu_test_build/$$base .lu_test_build/$$base.c -lm; \

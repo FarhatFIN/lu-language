@@ -1,0 +1,6 @@
+Lu/Language
+incl <b>
+
+fn f() -> int {
+    return 1
+}

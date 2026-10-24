@@ -1,0 +1,10 @@
+Lu/Strict
+// Same file reached by two spellings: a5 uses <d5>, b5 uses <./d5>.
+// v5 compares resolved paths literally (no realpath), so this may splice twice.
+incl <a5>
+incl <b5>
+
+fn main() -> int {
+    Pr(twice(21))
+    ret 0
+}

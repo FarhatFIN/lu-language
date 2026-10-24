@@ -1,0 +1,10 @@
+Lu/Strict
+
+// The diagnostic must name the included file and its real line, not the
+// including file or a freed path (regression: v5 freed the path while
+// spliced tokens still pointed at it).
+incl <fixtures/broken_include>
+
+fn main() -> int {
+    ret 0
+}

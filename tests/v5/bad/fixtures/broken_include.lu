@@ -1,0 +1,9 @@
+Lu/Strict
+
+fn broken_fn() -> int {
+    ret 1
+}
+
+fn broken_fn() -> int {
+    ret 2
+}

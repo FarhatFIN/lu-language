@@ -1,0 +1,6 @@
+Lu/Strict
+
+fn main() -> int {
+    var p: ptr/byte = null
+    ret 0
+}

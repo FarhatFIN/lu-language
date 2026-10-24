@@ -1,0 +1,7 @@
+Lu/Strict
+// Q-02: can a v5 program see its own argv?  The C backend prelude defines
+// __luc_argc/__luc_argv; the native backend may not.
+fn main() -> int {
+    Pr(__luc_argc)
+    ret 0
+}

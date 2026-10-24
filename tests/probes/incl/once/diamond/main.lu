@@ -1,0 +1,10 @@
+Lu/Language
+// Diamond: main -> a -> d and main -> b -> d. d must be spliced once.
+incl <a>
+incl <b>
+
+fn main() -> int {
+    print(twice(21))
+    print(from_a() + from_b())
+    return 0
+}

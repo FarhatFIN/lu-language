@@ -1,0 +1,29 @@
+Lu/Strict
+// Q-02: directory enumeration through getdents64 (syscall 217), decoded with
+// byte arithmetic.  Run from this directory; lists dirwalk_fixture/.
+fn main() -> int {
+    var buf: byte[4096]
+    vid fd: int = syscall(2, "dirwalk_fixture", 65536, 0)
+    if fd < 0 {
+        Pr("open failed: ", fd)
+        ret 1
+    }
+    vid n: int = syscall(217, fd, &buf[0], 4096)
+    syscall(3, fd)
+    if n < 0 {
+        Pr("getdents64 failed: ", n)
+        ret 1
+    }
+    var off: int = 0
+    while off < n {
+        var reclen: int = int(buf[off + 16])
+        set reclen = reclen + (int(buf[off + 17]) << 8)
+        if reclen == 0 {
+            set off = n
+        } else {
+            Pr(&buf[off + 19])
+            set off = off + reclen
+        }
+    }
+    ret 0
+}

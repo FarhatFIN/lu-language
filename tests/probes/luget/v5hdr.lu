@@ -1,0 +1,9 @@
+Lu/Strict
+// Q-02: v5 has no `Import` keyword and only tensor.h is special-cased, so a
+// C header cannot be reached from a v5 unit.  Expected: compile-time error.
+incl <stdlib.h>
+
+fn main() -> int {
+    Pr("unreachable")
+    ret 0
+}

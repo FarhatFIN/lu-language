@@ -1,0 +1,6 @@
+Lu/Strict
+incl <d5>
+
+fn from_a() -> int {
+    ret twice(1)
+}

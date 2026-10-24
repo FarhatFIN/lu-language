@@ -1,0 +1,9 @@
+Lu/Strict
+
+fn seven(a: int, b: int, c: int, d: int, e: int, f: int, g: int) -> int {
+    ret a
+}
+
+fn main() -> int {
+    ret 0
+}

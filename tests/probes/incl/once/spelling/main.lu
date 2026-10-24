@@ -1,0 +1,10 @@
+Lu/Language
+// Same file reached by two spellings: a uses <d>, b uses <./d>.
+// Classic canonicalises with realpath, so d is spliced once.
+incl <a>
+incl <b>
+
+fn main() -> int {
+    print(twice(21))
+    return 0
+}

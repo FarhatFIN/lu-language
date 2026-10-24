@@ -1,0 +1,9 @@
+Lu/Strict
+
+fn main() -> int {
+    vid x: int = 1
+    if x {
+        ret 1
+    }
+    ret 0
+}

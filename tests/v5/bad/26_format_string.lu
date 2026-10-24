@@ -1,0 +1,6 @@
+Lu/Strict
+
+fn main() -> int {
+    Pr("%d", 42)
+    ret 0
+}

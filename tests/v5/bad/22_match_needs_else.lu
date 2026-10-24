@@ -1,0 +1,11 @@
+Lu/Strict
+
+fn main() -> int {
+    vid s: str = "a"
+    match s {
+        case "a" {
+            ret 1
+        }
+    }
+    ret 0
+}

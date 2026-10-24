@@ -1,0 +1,5 @@
+Lu/Language
+
+fn classic_fn() -> int {
+    return 9
+}

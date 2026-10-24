@@ -1,0 +1,21 @@
+Lu/Strict
+// Q-02: file I/O without libc, through raw syscalls from v5.
+// open(2) = 2, read(0), close(3).  Run from this directory.
+fn main() -> int {
+    var buf: byte[256]
+    vid fd: int = syscall(2, "data.txt", 0, 0)
+    if fd < 0 {
+        Pr("open failed: ", fd)
+        ret 1
+    }
+    vid n: int = syscall(0, fd, &buf[0], 255)
+    syscall(3, fd)
+    if n < 0 {
+        Pr("read failed: ", n)
+        ret 1
+    }
+    set buf[n] = 0
+    Pr("bytes=", n)
+    Pr(&buf[0])
+    ret 0
+}

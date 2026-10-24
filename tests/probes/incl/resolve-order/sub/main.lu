@@ -1,0 +1,9 @@
+Lu/Language
+// The include name also exists as ./lib.lu in the process CWD.
+// The including file's directory must win.
+incl <lib>
+
+fn main() -> int {
+    print(marker())
+    return 0
+}

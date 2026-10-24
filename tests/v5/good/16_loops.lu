@@ -1,0 +1,45 @@
+Lu/Strict
+
+fn main() -> int {
+    var i: int = 0
+    var s: int = 0
+    while i < 3 {
+        set s = s + i
+        set i = i + 1
+    }
+    Pr(s)
+
+    loop 3 {
+        set s = s + 1
+    }
+    Pr(s)
+
+    var sum: int = 0
+    for k in 0..5 {
+        set sum = sum + k
+    }
+    Pr(sum)
+
+    var arr: int[3]
+    set arr[0] = 2
+    set arr[1] = 4
+    set arr[2] = 6
+    var t: int = 0
+    for x in arr {
+        set t = t + x
+    }
+    Pr(t)
+
+    var n: int = 0
+    for k in 0..10 {
+        if k == 2 {
+            continue
+        }
+        if k == 5 {
+            break
+        }
+        set n = n + 1
+    }
+    Pr(n)
+    ret 0
+}

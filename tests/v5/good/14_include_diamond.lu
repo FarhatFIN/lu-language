@@ -1,0 +1,11 @@
+Lu/Strict
+// Diamond include reached through two spellings of the same file:
+// `<fixtures/diamond/d5>` and `<fixtures/diamond/./d5>`. Include-once is
+// canonicalised, so the function is defined exactly once.
+incl <fixtures/diamond/a5>
+incl <fixtures/diamond/b5>
+
+fn main() -> int {
+    Pr(twice(21))
+    ret 0
+}

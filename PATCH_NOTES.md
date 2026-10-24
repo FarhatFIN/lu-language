@@ -1,5 +1,46 @@
 # Patch notes: Lu compiler hardening pass
 
+## v4.7 — Lu v5 canonical, SPEC v0.1
+
+Consolidation starts here: the language has one canonical name and one
+normative document, and the compiler says which syntax it is compiling.
+
+**Banner and naming.** `luc 4.7 (Lu v5 canonical; Lu Classic frozen)`;
+every compilation reports `(Lu v5, O2)` or `(Lu Classic, O2)`. The literal
+file header `Lu/Strict` is unchanged — it names the format, not the language.
+README, GUIDE, SYNTAX, TUTORIAL and PATCH_NOTES use "Lu v5" / "Lu Classic"
+only. README gained a "Какой синтаксис выбрать" section; the freeze policy
+lives in `CONTRIBUTING.md` and `docs/meta/classic-freeze.md`.
+
+**`SPEC.md` v0.1.** Sections 1–12 plus Annex A (unimplemented or unspecified
+inventory) and Annex B (conformance map). Things the old syntax document
+promised but the compiler did not do are recorded as gaps, not rules:
+missing-return analysis, `pub` enforcement, `auto`, `Vector`, string
+interpolation, and column/`rule:`/`note:`/`hint:` diagnostics.
+`docs/meta/errors.md` catalogues every diagnostic v5 emits and marks which
+wording a test pins.
+
+**`dv(&x)` documented honestly.** It is a raw `read(0, &x, sizeof(T))`, not
+text parsing: `dv(&n)` on `int` reads four machine-order bytes. Use `Uin >> n`
+for numbers. The SYNTAX example now shows a byte read.
+
+**Bug fixes.**
+
+- v5 range-for leaked its synthesised names into the enclosing function:
+  two `for i in 0..n` loops made the C backend emit `int i` twice
+  ("redefinition of 'i'"). The lowering now wraps the range loop in its own
+  block. Regression: `tests/v5/good/16_loops.lu`.
+- v5 `incl` diagnostics could print heap garbage after the include path was
+  freed (session 1) — fixed by keeping spliced paths alive.
+- v5 include-once now canonicalises paths with `realpath` like Classic, so
+  `<d>` and `<./d>` are one file (session 1).
+
+**Tests.** `test-v5` grew from 22 to 33 checks: match/strings, loops, and
+negative fixtures for `match` exhaustiveness, parameter limit, `return`,
+`null`, format strings, use-after-`Del`, non-bool conditions. `test-all`
+iterates an explicit list of shipped programs, so a scratch file in `src/`
+can no longer break the floor.
+
 ## v4.6 — `incl` в v4 и первое приложение: LuMotion
 
 До этой версии `incl` существовал только в транспайлере v5: файл вставлялся
@@ -186,7 +227,7 @@ v5-программу с `incl <tensor.h>` через `-c`, проверяет, 
 реальный `incl` из подкаталога, а `tests/v5/bad/20_missing_incl.lu` — что
 отсутствующая библиотека падает на компиляции, а не в рантайме.
 
-## v4.3 — синтаксис Lu/Strict v5
+## v4.3 — Lu v5
 
 `luc` научился второму синтаксису. Файл с первой строкой `Lu/Strict`
 компилируется целиком в v5-грамматике из `SYNTAX.md` и работает на обоих

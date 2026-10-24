@@ -1,0 +1,5 @@
+Lu/Strict
+
+fn v5fn() -> int {
+    ret 7
+}

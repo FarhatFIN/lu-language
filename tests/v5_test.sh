@@ -1,5 +1,5 @@
 #!/bin/sh
-# Lu/Strict v5 regression suite.  Run from src via `make test-v5`.
+# Lu v5 regression suite.  Run from src via `make test-v5`.
 #
 # good/*.lu  must build through the native backend and produce exactly the
 #            stdout in the matching .stdout file (empty when absent) and the

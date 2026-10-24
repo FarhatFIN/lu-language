@@ -1,0 +1,8 @@
+Lu/Strict
+
+fn main() -> int {
+    var p: ptr/byte = Alloc(8)
+    Del p
+    set p[0] = 1
+    ret 0
+}

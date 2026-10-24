@@ -1,0 +1,8 @@
+Lu/Language
+// Classic unit pulling in a v5 unit: must be rejected with a diagnostic.
+incl <v5lib>
+
+fn main() -> int {
+    print(v5fn())
+    return 0
+}

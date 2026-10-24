@@ -1,0 +1,7 @@
+Lu/Language
+// No such file exists anywhere on the search path.
+incl <no_such_file_xyz>
+
+fn main() -> int {
+    return 0
+}
