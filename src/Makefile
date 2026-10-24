@@ -9,7 +9,7 @@ TARGET  = luc
 SRCS    = main.c lexer.c parser.c semantic.c codegen.c libraries.c util.c x86.c v5.c includes.c
 OBJS    = $(SRCS:.c=.o)
 
-.PHONY: all clean test test-all test-cli test-native test-v5 test-gui test-motion bootstrap doctor agent-test fuzz
+.PHONY: all clean test test-all test-cli test-native test-v5 test-ports test-gui test-motion bootstrap doctor agent-test fuzz
 
 all: $(TARGET)
 
@@ -21,23 +21,26 @@ $(TARGET): $(OBJS)
 	@echo "  CC  $<"
 	$(CC) $(CFLAGS) -c -o $@ $<
 
-# Quick self-test: compile the bundled example.
-test: $(TARGET) example.lu
-	./$(TARGET) -s example.lu -o example_out.c
+# Quick self-test: compile the bundled Classic example.
+test: $(TARGET) ../examples/classic/example.lu
+	./$(TARGET) -s ../examples/classic/example.lu -o example_out.c
 	$(CC) -O2 -std=c11 -o example_out example_out.c -lm
 	./example_out
 
 # Shipped Lu programs covered by test-all.  This is deliberately an explicit
 # list, not a glob: untracked scratch files in src/ must not break the floor.
 # calculator_gui.lu is built by `make test-gui` (it needs a display).
-TEST_PROGRAMS = example.lu kernel_advanced.lu kernel_sim.lu lu_compiler.lu \
-                messenger.lu native_demo.lu test_comprehensive.lu \
-                test_core_plus.lu test_full.lu test_paradigms.lu \
-                test_v13.lu test_v20.lu ../tests/calculator.lu \
-                ../tests/showcase.lu
+TEST_PROGRAMS = ../examples/classic/example.lu \
+                ../examples/classic/showcase.lu \
+                ../examples/classic/test_comprehensive.lu \
+                ../examples/classic/test_core_plus.lu \
+                ../examples/classic/test_full.lu \
+                kernel_advanced.lu kernel_sim.lu lu_compiler.lu \
+                messenger.lu native_demo.lu test_paradigms.lu \
+                test_v13.lu test_v20.lu ../tests/calculator.lu
 
 # Full regression pass over bundled Lu programs.
-test-all: $(TARGET) test-cli test-native test-v5
+test-all: $(TARGET) test-cli test-native test-v5 test-ports
 	@rm -rf .lu_test_build
 	@mkdir -p .lu_test_build
 	@set -e; \
@@ -64,6 +67,11 @@ test-native: $(TARGET)
 test-v5: $(TARGET)
 	sh ../tests/v5_test.sh
 
+# Shipped programs ported to v5: each port must match the Classic original's
+# stdout and exit status on every backend listed in tests/ports/backends.txt.
+test-ports: $(TARGET)
+	sh ../tests/ports/run.sh
+
 # GUI demo: compile + link the X11 calculator (no run — needs a display).
 test-gui: $(TARGET) calculator_gui.lu
 	./$(TARGET) calculator_gui.lu -o .lu_test_build/calculator_gui.c
@@ -87,7 +95,10 @@ agent-test: doctor
 fuzz: $(TARGET)
 	./fuzz_test.sh $${ROUNDS:-100}
 
-bootstrap: $(TARGET) lu_compiler.lu lu_self_runtime.h
+# lu_compiler.lu is an input, not a target: if it is listed as a
+# prerequisite while a stale lu_compiler.lu.c exists, make's built-in
+# "%: %.c" rule compiles that artifact over the source.
+bootstrap: $(TARGET) lu_self_runtime.h
 	./bootstrap.sh
 
 clean:

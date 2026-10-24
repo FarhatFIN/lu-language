@@ -1,6 +1,6 @@
 # Diagnostic catalogue v1
 
-Charter Appendix F. This lists the diagnostics `luc 4.7` emits, with a
+Charter Appendix F. This lists the diagnostics `luc 4.8` emits, with a
 trigger and the test that pins the wording. Classes:
 
 - **S (stable)** — a test asserts this message; wording is a compatibility
@@ -26,7 +26,7 @@ U-07 in `SPEC.md` Annex A, not yet done.
 | ID | Message | Trigger | Class / test |
 |---|---|---|---|
 | E-001 | `unexpected character '%c'` | `;` or any non-token byte | S — `tests/v5/bad/13_semicolon.lu` |
-| E-002 | `unexpected token '%s'` | wrong token where a construct is expected; also `return`, `asm` | S — `tests/v5/bad/16_missing_brace.lu` |
+| E-002 | `unexpected token '%s'` | wrong token where a construct is expected; also `return`, `asm` | S — `tests/v5/bad/16_missing_brace.lu`, `24_return_keyword.lu` |
 | E-003 | `unexpected token '%s' at top level` | statement outside a function, e.g. `Import` | P |
 | E-004 | `block required` | `if c ret 0` | P |
 | E-005 | `assignment to '%s' requires 'set'` | bare assignment to a declared name | P |
@@ -37,7 +37,7 @@ U-07 in `SPEC.md` Annex A, not yet done.
 
 | ID | Message | Trigger | Class / test |
 |---|---|---|---|
-| E-010 | `undeclared name '%s'` | `x = 5`; `null`; `f"..."` | S — `tests/v5/bad/14_bare_assign.lu` |
+| E-010 | `undeclared name '%s'` | `x = 5`; `null`; `f"..."` | S — `tests/v5/bad/14_bare_assign.lu`, `25_null.lu` |
 | E-011 | `redeclaration of '%s' (shadowing is forbidden)` | inner `vid x` | S — `tests/v5/bad/18_shadowing.lu` |
 | E-012 | `redeclaration of function '%s'` | two `fn f` | P |
 | E-013 | `missing type for '%s'` | `vid x = 5` | S — `tests/v5/bad/19_missing_type.lu` |
@@ -47,9 +47,10 @@ U-07 in `SPEC.md` Annex A, not yet done.
 | E-017 | `unknown method '%s' on '%s'` | method not found on a struct | P |
 | E-018 | `unknown field '%s' in '%s'` | field not found | P |
 | E-019 | `unknown packed field '%s' in '%s'` | pack field not found | P |
-| E-020 | `too many parameters (max 6)` | 7-parameter function | P |
+| E-020 | `too many parameters (max 6)` | 7-parameter function | S — `tests/v5/bad/23_too_many_params.lu` |
 | E-021 | `global state must be declared immutable with 'vid'` | top-level `var` | P |
 | E-022 | `expected a variable name` / `a struct name` / … | `expect_id` variants | P |
+| E-023 | `field '%s' of '%s' is private; declare it 'pub' to use it outside the struct` | private field read/write outside the declaring struct's methods | S — `tests/v5/bad/29_private_field.lu` |
 
 ## Types and values
 
@@ -60,7 +61,7 @@ U-07 in `SPEC.md` Annex A, not yet done.
 | E-032 | `cannot initialise '%s' (%s) with %s — use an explicit conversion` | declaration mismatch | P |
 | E-033 | `implicit conversion %s -> %s; write %s(...)` | `int i = b` where `b: byte` | S — `tests/v5/bad/03_implicit_byte.lu` |
 | E-034 | `cannot assign to immutable '%s'` | `set` on a `vid` | S — `tests/v5/bad/17_vid_immutable.lu` |
-| E-035 | `condition must be bool, found %s` | `if x` with `x: int` | P |
+| E-035 | `condition must be bool, found %s` | `if x` with `x: int` | S — `tests/v5/bad/28_condition_int.lu` |
 | E-036 | `argument %d of '%s' is %s, expected %s (use an explicit conversion)` | argument type mismatch | P |
 | E-037 | `array element %d is %s, expected %s` | array literal element mismatch | P |
 | E-038 | `too many elements for '%s' (%d)` | array literal too long | P |
@@ -75,17 +76,21 @@ U-07 in `SPEC.md` Annex A, not yet done.
 
 | ID | Message | Trigger | Class / test |
 |---|---|---|---|
-| E-050 | `use of '%s' after Del` | use or second `Del` after `Del p` | P |
+| E-050 | `use of '%s' after Del` | use or second `Del` after `Del p` | S — `tests/v5/bad/27_use_after_del.lu` |
 
 ## Control flow
 
 | ID | Message | Trigger | Class / test |
 |---|---|---|---|
-| E-060 | `match on %s needs an else branch` | non-exhaustive `match` on `str`/int | P |
+| E-060 | `match on %s needs an else branch` | non-exhaustive `match` on `str`/int | S — `tests/v5/bad/22_match_needs_else.lu` |
 | E-061 | `expected 'case' or 'else' in match` | malformed match body | P |
 | E-062 | `expected 'in' in for loop` | `for x 0..5` | P |
 | E-063 | `right side of 'in' must be an array` | `x in 5` | P |
 | E-064 | `expected a loop variable` | malformed `for` | P |
+| E-065 | `missing return in non-void function '%s'` | a non-`void` function can fall off the end | S — `tests/v5/bad/30_missing_return.lu` |
+| E-066 | `missing return in non-void method '%s.%s'` | the same rule for methods | S — `tests/v5/bad/31_missing_return_method.lu` |
+| E-067 | `non-void function must return a value` | bare `ret` in a non-`void` function | S — `tests/v5/bad/32_ret_without_value.lu` |
+| E-068 | `void function must not return a value` | `ret e` in a `void` function | S — `tests/v5/bad/33_ret_value_void.lu` |
 
 ## Bit fields (`pack`)
 
@@ -100,7 +105,7 @@ U-07 in `SPEC.md` Annex A, not yet done.
 
 | ID | Message | Trigger | Class / test |
 |---|---|---|---|
-| E-080 | `format strings are forbidden: Pr takes values, not a format` | `Pr("%d", x)` | P |
+| E-080 | `format strings are forbidden: Pr takes values, not a format` | `Pr("%d", x)` | S — `tests/v5/bad/26_format_string.lu` |
 | E-081 | `dv expects a reference, e.g. dv(&x)` | `dv(x)` | P |
 | E-082 | `dv cannot read into %s` | `dv(&s)` on `str`/array | P |
 | E-083 | `cannot stream a %s value` | `Uout << struct` | P |

@@ -1,0 +1,12 @@
+Lu/Strict
+
+struct Hero {
+    hp: int
+    pub name: str
+}
+
+fn main() -> int {
+    var h: Hero
+    set h.hp = 100
+    ret 0
+}

@@ -1,0 +1,17 @@
+Lu/Strict
+
+struct Box {
+    pub v: int
+
+    fn positive(self) -> bool {
+        if self.v > 0 {
+            ret true
+        }
+    }
+}
+
+fn main() -> int {
+    var b: Box
+    Pr(b.positive())
+    ret 0
+}

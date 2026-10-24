@@ -22,9 +22,12 @@ per-compilation dialect in the compile line).
 
 ## 2. Test matrix
 
+Recorded at S0. Current counts and the added `test-ports` runner are in
+`worklog.md`.
+
 | Runner | Result |
 |---|---|
-| `make -C src test` | pass (example.lu → C backend → run) |
+| `make -C src test` | pass (`examples/classic/example.lu` → C backend → run) |
 | `make -C src test-cli` | pass (`all checks passed`) |
 | `make -C src test-native` | pass (5/5 parity: core, logic, loops, memory, syscalls) |
 | `make -C src test-v5` | pass (24/24; 22 pre-existing + 2 regressions added in session 1) |
@@ -53,7 +56,9 @@ One pre-existing compiler warning surfaces in `make test`:
 ```
 
 `example.lu` is Classic and mixes a `Lin` reference with no matching block.
-Baseline fact; triaged as T-02 (port/wording work at S4).
+Baseline fact; triaged as T-02. Closed in S4: the Classic original moved to
+`examples/classic/example.lu`, the v5 port in `examples/v5/example.lu` drops
+the inert reference, and `make test-ports` compares the two.
 
 ## 3. Legacy-usage inventory
 
@@ -189,10 +194,14 @@ condition additionally depends on G-PH1).
 | ID | Item | Priority |
 |---|---|---|
 | T-01 | `test-all` globs `src/*.lu`; scratch files break the floor | P1 (blocks a clean `make check`) |
-| T-02 | `example.lu` emits a `Lin`/`Pr/` warning | P3 (S4 port) |
+| T-02 | `example.lu` emits a `Lin`/`Pr/` warning | closed (S4 port: `examples/v5/example.lu`; `make test-ports`) |
 | T-03 | `incl` missing-file diagnostics differ between front-ends; v5 omits the search order | P2 (S3 error catalogue) |
 | T-04 | v5 cannot import C headers; only `tensor.h` is special-cased | P1 (Q-02 blocker; S3/ADR) |
 | T-05 | v5 has no argv; Classic/C-backend does via prelude | P1 (Q-02 blocker; S3/ADR) |
 | T-06 | v5 cannot express an argv array / pointer cast; no spawn | P1 (Q-02 blocker; S3/ADR) |
 | T-07 | Native recursion segfaults ~30k with no diagnostic | P2 (document in SPEC Annex A; not luget-critical) |
 | T-08 | A bare `{ … }` block in Classic is emitted in reverse order on the native backend and produces invalid C on the C backend (`printf` outside a function). Found while looking for a scoping wrapper for v5 range-for. | P3 (Classic frozen; v5 lowering avoids bare blocks and uses a synthetic `if true` block) |
+| T-09 | GUIDE presents Classic as the primary syntax; the Classic→v5 migration chapter required by charter §9.4 is missing. SPEC §12 is the normative delta table meanwhile. Found by the first S4 port. | P2 (docs; S4) |
+| T-10 | Four corpus files cannot be ported without changing output: `test_v13` (string building, U-11), `test_v20` (v2.0 feature demo: U-02/U-03/U-04, `float`, stdlib), `test_paradigms` and `tests/calculator` (`float`). See `docs/meta/ports/blocked.md`. | P2 (S4 finding; Q7) |
+| T-11 | `make bootstrap` listed `lu_compiler.lu` as a prerequisite; with a stale `lu_compiler.lu.c` present, make's built-in `%: %.c` rule compiled the artifact over the source. | fixed in S4 (D-0019); source restored from HEAD, fixed-point re-verified |
+| T-12 | Native codegen quality: session 1 measured 0.279 / 0.079 / 0.012 s on arith/mem/fib; after the session-5 backend program it is 0.0615 / 0.0127 / 0.0066 s (gcc -O2: 0.0618 / 0.0101 / 0.0031). Remaining fib gap is gcc's recursion unrolling. | recorded in ADR D-0020; native remains static, syscall-only, and parity-tested |

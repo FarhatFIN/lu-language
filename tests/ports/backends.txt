@@ -1,0 +1,13 @@
+# Differential port manifest (charter §7.7).
+#
+# <classic program> <backend>...
+#
+# The Classic original is read from examples/classic/, the port from
+# examples/v5/.  Every listed backend must reproduce the original's stdout
+# and exit status.  A port with no manifest line is not tested, so add the
+# line in the same change as the port.
+example.lu c native
+showcase.lu c native
+test_full.lu c native
+test_core_plus.lu c native
+test_comprehensive.lu c native

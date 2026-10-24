@@ -1,0 +1,37 @@
+Lu/Strict
+
+vid timeout: int = 5000
+
+fn check(a: int, b: int) -> bool {
+    if a == b {
+        ret true
+    }
+    ret false
+}
+
+fn main() -> int {
+    if 2 + 2 == 4 {
+        Pr("Правильно! 2+2=4")
+    } else {
+        Pr("Неправильно")
+    }
+
+    // The Classic original opens this block with Def:anw(2+2)/Lin, which
+    // matched no block in 4.8 (T-02) and had no runtime effect.
+    if 1 + 9 == 11 {
+        Pr("Неправильно! 1+9=10")
+    } else {
+        Pr("Правильно! 1+9=10")
+    }
+
+    loop 3 {
+        Pr("Итерация")
+    }
+
+    var x: int = 0
+    while x < 5 {
+        set x = x + 1
+    }
+    Pr(x)
+    ret 0
+}

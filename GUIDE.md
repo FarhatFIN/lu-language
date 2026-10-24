@@ -1808,10 +1808,11 @@ int main(int argc, char **argv) {
 | `make test-all` | компилирует и запускает все `.lu` из `src/` и `tests/` |
 | `make test-cli` | CLI и ошибки файлового ввода-вывода |
 | `make test-native` | паритет бэкендов: `-n` и `-c`+cc дают одинаковые stdout и код возврата |
-| `make test-v5` | Lu v5: 12 программ собираются, 8 отвергаются |
+| `make test-v5` | Lu v5: все `good` собираются и запускаются, все `bad` отвергаются (39 проверок) |
+| `make test-ports` | порты `examples/v5/` дают тот же stdout и код возврата, что и Classic-оригиналы |
 | `make test-gui` | собирает X11-калькулятор без запуска |
 | `make doctor` | собирает C-раннер регрессий |
-| `make agent-test` | запускает `lu_doctor` (65 проверок) |
+| `make agent-test` | запускает `lu_doctor` (66 проверок) |
 | `make fuzz ROUNDS=100` | случайные программы: компилятор не должен падать |
 | `make bootstrap` | проверка самохостинга |
 | `make clean` | удаляет артефакты |
@@ -1879,7 +1880,7 @@ print("готово")
 
 ### Старый синтаксис
 
-Он поддерживается для совместимости и встречается в `src/example.lu`:
+Он поддерживается для совместимости и встречается в `examples/classic/example.lu`:
 
 | Современный | Старый |
 |---|---|
@@ -2104,8 +2105,9 @@ UTF-8.
 прелюдию. Затем регрессия в `tests/` и `make test-all`.
 
 **Где смотреть примеры?**
-`TUTORIAL.md`, `src/example.lu`, `src/calculator_gui.lu`, `tests/showcase.lu`,
-`tests/calculator.lu`.
+`TUTORIAL.md`, `examples/v5/example.lu`, `examples/v5/showcase.lu`
+(порты с Classic-оригиналами в `examples/classic/`),
+`src/calculator_gui.lu`, `tests/calculator.lu`.
 
 ---
 

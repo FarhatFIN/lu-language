@@ -1,0 +1,27 @@
+Lu/Strict
+
+vid MAX: int = 10
+
+fn add(a: int, b: int) -> int {
+    ret a + b
+}
+
+fn main() -> int {
+    if 2 + 2 == 4 {
+        Pr("2+2=4 ok")
+    } else {
+        Pr("wrong")
+    }
+
+    var x: int = 1
+    loop 3 {
+        set x = x + 1
+    }
+    Pr(x)
+
+    while x > 2 {
+        set x = x - 1
+    }
+    Pr(x)
+    ret 0
+}

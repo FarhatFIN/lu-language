@@ -30,8 +30,8 @@ for level in 0 1 2 3; do
 done
 
 # Banner/--version: compiler version plus both syntax generations (charter 6.1).
-test "$(./luc -v)" = "luc 4.7 (Lu v5 canonical; Lu Classic frozen)"
-./luc -h 2>&1 | head -1 | grep -F "Lu Compiler  v4.7 (Lu v5 canonical; Lu Classic frozen)" > /dev/null
+test "$(./luc -v)" = "luc 4.8 (Lu v5 canonical; Lu Classic frozen)"
+./luc -h 2>&1 | head -1 | grep -F "Lu Compiler  v4.8 (Lu v5 canonical; Lu Classic frozen)" > /dev/null
 printf 'Lu/Strict\nfn main() -> int {\n    ret 0\n}\n' > "$work/v5.lu"
 ./luc "$work/v5.lu" -o "$work/v5prog" 2> "$work/stderr"
 grep -F "compiling '$work/v5.lu'  (Lu v5, O2)" "$work/stderr" > /dev/null

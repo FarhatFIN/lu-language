@@ -1,0 +1,39 @@
+Lu/Strict
+
+struct Vec2 {
+    pub x: int
+    pub y: int
+
+    fn sum(self) -> int {
+        ret self.x + self.y
+    }
+}
+
+fn add(a: int, b: int) -> int {
+    ret a + b
+}
+
+fn main() -> int {
+    var a: int = add(8, 4)
+    Pr(a)
+
+    var div: int = 8 / 2
+    Pr(div)
+
+    var arr: int[3] = [1, 2, 3]
+    Pr(arr[1])
+
+    var v: Vec2
+    set v.x = 6
+    set v.y = 7
+    var total: int = v.sum()
+    Pr(total)
+
+    var p: ptr/Vec2 = Alloc(1)
+    set p.x = 20
+    set p.y = 22
+    var ptotal: int = p.sum()
+    Pr(ptotal)
+    Del p
+    ret 0
+}

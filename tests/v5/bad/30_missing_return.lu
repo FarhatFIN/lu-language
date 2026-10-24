@@ -1,0 +1,12 @@
+Lu/Strict
+
+fn pick(c: bool) -> int {
+    if c {
+        ret 1
+    }
+}
+
+fn main() -> int {
+    Pr(pick(true))
+    ret 0
+}

@@ -1,0 +1,48 @@
+Lu/Strict
+
+struct Point {
+    pub x: int
+    pub y: int
+}
+
+// Classic enum Color { RED, GREEN, BLUE }: v5 has no enum, so the members
+// become top-level immutable values with the same names and ordinals.
+vid RED: int = 0
+vid GREEN: int = 1
+vid BLUE: int = 2
+
+fn max(a: int, b: int) -> int {
+    if a > b {
+        ret a
+    }
+    ret b
+}
+
+fn main() -> int {
+    Pr("=== Lu Compiler v1.1 Test ===")
+
+    var n: int = 5
+    set n = n + 3
+    Pr(n)
+
+    if n > 7 {
+        Pr("n is big")
+    } else if n == 7 {
+        Pr("n is seven")
+    } else {
+        Pr("n is small")
+    }
+
+    var sum: int = 0
+    loop 4 {
+        set sum = sum + 1
+    }
+    Pr(sum)
+
+    var p: ptr/int = Alloc(1)
+    Memset(p, 0, 4)
+    Del p
+
+    Pr("done")
+    ret 0
+}

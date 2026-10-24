@@ -1,0 +1,10 @@
+Lu/Strict
+
+fn g() -> void {
+    ret 5
+}
+
+fn main() -> int {
+    g()
+    ret 0
+}

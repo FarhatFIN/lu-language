@@ -1,5 +1,73 @@
 # Patch notes: Lu compiler hardening pass
 
+## v4.8 — struct privacy and return checking
+
+Two gaps that SPEC v0.1 recorded as unimplemented are now rules with tests.
+
+**Private fields.** A field without `pub` is visible only inside the methods of
+the struct that declares it. Reading or writing it elsewhere is rejected:
+`field 'hp' of 'Hero' is private; declare it 'pub' to use it outside the
+struct`. Methods stay public. Every in-tree v5 struct already marked its
+fields `pub`, so no corpus change was needed.
+
+**Missing return.** A non-`void` function or method that can fall off the end
+is rejected: `missing return in non-void function 'f'`, `missing return in
+non-void method 'S.m'`. The analysis is structural: an `if` chain needs a final
+`else` and every branch must return; `match` needs `else` and every branch must
+return; loops count as zero iterations, so a `ret` inside a loop does not
+satisfy the check. `ret` and the result type must also agree: a bare `ret` in a
+non-`void` function and `ret e` in a `void` function are rejected.
+
+**Native backend: independent and competitive.** `luc -n` stays a static
+x86-64 ELF with no interpreter, no shared libraries, no libc and no external
+assembler or linker; `tests/native_test.sh` now refuses any output that has a
+dynamic dependency. Code generation got a static register cache (r12–r15 for
+up to four address-not-taken scalars), branch/compare fusion, SIB-scaled
+indexed addressing for loads and stores, memory-operand accumulation
+(`acc += p[i]`), direct argument preparation (`f(v - k)`), a shorter
+round-up magic sequence for constant `/` and `%`, and 16-byte-aligned loop
+heads. Against `gcc -O2` on the Author's microbenchmarks (best of five):
+arith 20M — 0.0615 s vs 0.0618 s (1.00x); mem 5M — 0.0127 s vs 0.0101 s
+(1.26x); fib(30) — 0.0066 s vs 0.0031 s (2.12x). The `fib` gap is gcc's
+eight-level recursion unrolling; this backend does not inline yet. Two
+differential regressions were added: `tests/native/divmod.lu` (constant and
+runtime signed division/modulo across sign and magnitude edges) and
+`tests/native/indexregs.lu` (indexed access with the pointer in r12/r14 and
+the index in r13 — a SIB-form bug that previously stored the address instead
+of the value). The rationale is recorded in ADR D-0020.
+
+**SPEC v0.2.** §4.3 and §6 are normative, Annex A loses U-01 and U-05;
+`docs/meta/errors.md` gains E-023/E-065–E-068 and promotes six previously
+provisional messages to stable (they already had tests).
+
+**Tests.** `test-v5` grew from 33 to 39 checks: `good/17_flow`,
+`bad/29_private_field`, `bad/30_missing_return`,
+`bad/31_missing_return_method`, `bad/32_ret_without_value`,
+`bad/33_ret_value_void`.
+
+**First S4 ports.** Five shipped programs now have v5 translations in
+`examples/v5/`, with the Classic originals preserved in
+`examples/classic/`: `example`, `showcase`, `test_full`, `test_core_plus`,
+`test_comprehensive`. All five produce byte-identical stdout and exit status
+on the C and native backends. `make test-ports` compiles each port and its
+Classic original, runs both, and compares the results according to
+`tests/ports/backends.txt`; it is wired into `test-all`. `example.lu`'s inert
+`Def:anw(2+2)/Lin` reference is dropped, so the `Lin` warning (T-02) no
+longer applies to the shipped example. Four corpus files (`test_v13`,
+`test_v20`, `test_paradigms`, `tests/calculator`) cannot be ported without
+changing output because v5 deliberately lacks string building, `float`, and
+the v2.0 feature set; they stay Classic-only pending Q7
+(`docs/meta/ports/blocked.md`). SPEC §12 now lists every Classic construct
+the ports had to translate, and §4.4 states that `p.field`/`p.method()`
+auto-dereference a pointer to a struct. Port reports:
+`docs/meta/ports/*.md`.
+
+**Build fix.** `make bootstrap` no longer lists `lu_compiler.lu` as a
+prerequisite. With a stale `lu_compiler.lu.c` present, GNU make's built-in
+`%: %.c` rule compiled that artifact over the source file. Found while
+running the S4 gate; the source was restored from git and the bootstrap
+fixed-point check re-verified.
+
 ## v4.7 — Lu v5 canonical, SPEC v0.1
 
 Consolidation starts here: the language has one canonical name and one

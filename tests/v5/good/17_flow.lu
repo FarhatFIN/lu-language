@@ -1,0 +1,51 @@
+Lu/Strict
+
+struct Counter {
+    n: int
+
+    fn bump(self, d: int) -> int {
+        set self.n = self.n + d
+        ret self.n
+    }
+
+    fn sign(self) -> int {
+        if self.n > 0 {
+            ret 1
+        } else if self.n < 0 {
+            ret -1
+        } else {
+            ret 0
+        }
+    }
+}
+
+fn classify(x: int) -> str {
+    match x {
+        case 0 {
+            ret "zero"
+        }
+        case 1 {
+            ret "one"
+        }
+        else {
+            ret "many"
+        }
+    }
+}
+
+fn note(x: int) -> void {
+    if x > 0 {
+        Pr("positive")
+    }
+}
+
+fn main() -> int {
+    var c: Counter
+    Pr(c.bump(5))
+    Pr(c.sign())
+    Pr(classify(0))
+    Pr(classify(1))
+    Pr(classify(7))
+    note(3)
+    ret 0
+}

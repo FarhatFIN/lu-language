@@ -2,7 +2,7 @@
   <img src="assets/logo.png" alt="Lu" width="180">
 </p>
 
-# luc — Lu Language Compiler v4.7
+# luc — Lu Language Compiler v4.8
 
 **Lu** — компилируемый язык программирования с **компактным синтаксисом**, **явной статической типизацией** и **низкоуровневой интеграцией с C**.
 Два бэкенда: **собственный x86-64** (по умолчанию, без gcc) и **C11** (для GUI, X11 и тензоров).
@@ -608,11 +608,11 @@ x &= 0xFF  x |= 0x100  x ^= 0xFF  x <<= 4  x >>= 2
 make
 
 # Нативный бэкенд: свой статический ELF, gcc не нужен
-./luc example.lu -o example
+./luc examples/v5/example.lu -o example
 ./example
 
 # C-бэкенд: для GUI/X11, тензоров и всего, что требует C-библиотек
-./luc -c example.lu -o example.c
+./luc -c examples/v5/example.lu -o example.c
 gcc -O2 -std=c11 -o example example.c -lm
 ./example
 
@@ -945,15 +945,19 @@ Lu содержит "игровой движок" из ранних версий
 ├── lu_self_runtime.h     # Рантайм самохостинга
 ├── Makefile
 ├── bootstrap.sh          # Скрипт самохостинга
-├── example.lu            # Учебный пример (Lu-стиль)
 ├── native_demo.lu        # Демонстрация нативного бэкенда
 ├── test_v20.lu           # Демонстрация v2.0 (новый синтаксис)
+├── test_v13.lu           # Регрессии v1.3
+├── test_paradigms.lu     # Демонстрация парадигм
 ├── lu_compiler.lu        # luc, написанный на Lu
 ├── calculator_gui.lu     # GUI-калькулятор на Lu + X11 (v4.0)
-├── test_*.lu             # Тесты
 ├── include/Uios.lu       # Библиотека потоков ввода-вывода: incl <Uios>
+├── ../examples/          # Поставляемые программы
+│   ├── classic/          #   Classic-оригиналы (baseline)
+│   └── v5/               #   порты на Lu v5 (make test-ports)
 └── ../tests/             # Регрессии: cli_test.sh, native_test.sh, v5_test.sh
     ├── native/*.lu       #   сборка обоими бэкендами, сверка stdout и rc
+    ├── ports/            #   дифференциальный прогон портов Classic ↔ v5
     └── v5/good/*.lu      #   программы v5 + .stdout / .rc / .stdin
 ```
 
@@ -964,6 +968,10 @@ Lu содержит "игровой движок" из ранних версий
 бэкендом, запускается с `.stdin` (если он есть) и сверяется с `.stdout` и
 `.rc`, а при наличии `cc` — ещё и прогоняется через C-бэкенд, чтобы оба
 бэкенда давали одинаковый результат (`make test-v5`).
+
+`examples/v5/*.lu` — порты поставляемых программ. Каждый порт сверяется с
+Classic-оригиналом из `examples/classic/` по stdout и коду возврата на
+каждом бэкенде из `tests/ports/backends.txt` (`make test-ports`).
 
 ---
 
@@ -990,5 +998,5 @@ Lu содержит "игровой движок" из ранних версий
 
 ## Лицензия
 
-Lu Compiler v4.7 · 2026. Распространяется по [Apache License 2.0](LICENSE);
+Lu Compiler v4.8 · 2026. Распространяется по [Apache License 2.0](LICENSE);
 уведомления об авторстве — в [NOTICE](NOTICE).

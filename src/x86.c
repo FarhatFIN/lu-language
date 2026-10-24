@@ -16,6 +16,11 @@
 #include <stdarg.h>
 #include <sys/stat.h>
 
+#if defined(__SIZEOF_INT128__)
+/* The constant-divisor magic needs a 128-bit intermediate. */
+__extension__ typedef unsigned __int128 u128;
+#endif
+
 /* ─────────────────────────────────────────────
    Layout constants
    ───────────────────────────────────────────── */
@@ -130,6 +135,7 @@ typedef struct {
     int   count;
     int   off;       /* local: rbp-off; global: data offset */
     bool  global;
+    int   reg;       /* 0 = memory; else a callee-saved x86 register */
 } Var;
 
 #define XV_MAX_VAR 2048
@@ -307,6 +313,17 @@ static void i_store_slot_reg(X *x, int disp, Type *t, int reg) {
         modrm_mem(x, reg, 5, -disp);
     }
 }
+/* typed load into an arbitrary register: reg = [rbp-off] */
+static void i_load_slot_reg(X *x, int reg, int disp, Type *t) {
+    if (t->kind == TY_BOOL || t->kind == TY_BYTE) {
+        rex_nw(x, reg, 5);
+        e8(x, 0x0F); e8(x, 0xB6); modrm_mem(x, reg, 5, -disp);
+    } else if (t->size == 8) {
+        rex_w(x, reg, 5); e8(x, 0x8B); modrm_mem(x, reg, 5, -disp);
+    } else {
+        rex_w(x, reg, 5); e8(x, 0x63); modrm_mem(x, reg, 5, -disp);
+    }
+}
 
 /* rax = [rax] with the given element type */
 static void i_load_at_rax(X *x, Type *t) {
@@ -358,6 +375,166 @@ static void i_setcc(X *x, int cc) {
 static void i_movzx_rax_al(X *x) { e8(x, 0x0F); e8(x, 0xB6); e8(x, 0xC0); }
 static void i_movsxd_rax_eax(X *x) { e8(x, 0x48); e8(x, 0x63); e8(x, 0xC0); }
 
+/* rax ← rax OP imm. The immediate forms keep one-operand expressions such
+   as `i + 1` from round-tripping through rcx. */
+static bool imm32_ok(int64_t v) { return v >= -2147483648LL && v <= 2147483647LL; }
+static bool imm8_ok(int64_t v)  { return v >= -128 && v <= 127; }
+
+static void i_alu_rax_imm(X *x, int digit, int opcode32, int64_t v) {
+    if (imm8_ok(v)) {
+        e8(x, 0x48); e8(x, 0x83); e8(x, 0xC0 | (digit << 3)); e8(x, (int)(v & 0xFF));
+    } else {
+        e8(x, 0x48); e8(x, opcode32); e32(x, (int32_t)v);
+    }
+}
+static void i_add_rax_imm(X *x, int64_t v) { i_alu_rax_imm(x, 0, 0x05, v); }
+static void i_sub_rax_imm(X *x, int64_t v) { i_alu_rax_imm(x, 5, 0x2D, v); }
+static void i_and_rax_imm(X *x, int64_t v) { i_alu_rax_imm(x, 4, 0x25, v); }
+static void i_or_rax_imm(X *x, int64_t v)  { i_alu_rax_imm(x, 1, 0x0D, v); }
+static void i_xor_rax_imm(X *x, int64_t v) { i_alu_rax_imm(x, 6, 0x35, v); }
+static void i_cmp_rax_imm(X *x, int64_t v) { i_alu_rax_imm(x, 7, 0x3D, v); }
+
+/* imul rax, rax, imm */
+static void i_imul_rax_imm(X *x, int64_t v) {
+    if (imm8_ok(v)) {
+        e8(x, 0x48); e8(x, 0x6B); e8(x, 0xC0); e8(x, (int)(v & 0xFF));
+    } else {
+        e8(x, 0x48); e8(x, 0x69); e8(x, 0xC0); e32(x, (int32_t)v);
+    }
+}
+/* shift by an immediate: /4 shl, /5 shr, /7 sar */
+static void i_shift_rax_imm(X *x, int digit, int64_t v) {
+    e8(x, 0x48); e8(x, 0xC1); e8(x, 0xC0 | (digit << 3)); e8(x, (int)(v & 0x3F));
+}
+static void i_shl_rax_imm(X *x, int64_t v) { i_shift_rax_imm(x, 4, v); }
+static void i_shr_rax_imm(X *x, int64_t v) { i_shift_rax_imm(x, 5, v); }
+static void i_sar_rax_imm(X *x, int64_t v) { i_shift_rax_imm(x, 7, v); }
+
+/* lea rax, [rcx + rax*scale]; scale must be 1, 2, 4 or 8. */
+static void i_lea_rax_rcx_index(X *x, int scale) {
+    int sb = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+    e8(x, 0x48); e8(x, 0x8D); e8(x, 0x04); e8(x, (sb << 6) | 0x01);
+}
+
+/* lea rax, [rax + rcx*scale]; scale must be 1, 2, 4 or 8. */
+static void i_lea_rax_base_rcx(X *x, int scale) {
+    int sb = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+    e8(x, 0x48); e8(x, 0x8D); e8(x, 0x04); e8(x, (sb << 6) | 0x08);
+}
+
+/* lea rax, [rax + idxreg*scale]. rsp cannot appear as an SIB index,
+   and r12 encodes as rsp there, so callers must not pass it. */
+static void i_lea_rax_reg_index(X *x, int idxreg, int scale) {
+    int sb = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+    e8(x, 0x48 | ((idxreg & 8) ? 2 : 0));
+    e8(x, 0x8D); e8(x, 0x04);
+    e8(x, (sb << 6) | ((idxreg & 7) << 3));
+}
+
+/* lea rcx, [base + idxreg*scale]. rsp/r12 cannot appear as an SIB index,
+   so the index register must not be one. The base may be any register:
+   rsp/r12 need the disp32 form and rbp/r13 the disp8 form, because their
+   encodings in the base field otherwise mean "no base". */
+static void i_lea_rcx_regs(X *x, int base, int idxreg, int scale) {
+    int sb = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+    int mod = (base & 7) == 4 ? 2 : (base & 7) == 5 ? 1 : 0;
+    e8(x, 0x48 | ((idxreg & 8) ? 2 : 0) | ((base & 8) ? 1 : 0));
+    e8(x, 0x8D);
+    e8(x, (mod << 6) | 0x0C);
+    e8(x, (sb << 6) | ((idxreg & 7) << 3) | (base & 7));
+    if (mod == 2) e32(x, 0);
+    else if (mod == 1) e8(x, 0);
+}
+
+/* dst OP= [base + idxreg*scale], 64-bit. rsp/r12 cannot be an SIB index;
+   the base may be any register (rsp/r12 use disp32, rbp/r13 use disp8). */
+static void i_alu_reg_mem_sib(X *x, int digit, int dst, int base, int idxreg, int scale) {
+    int sb = scale == 8 ? 3 : scale == 4 ? 2 : scale == 2 ? 1 : 0;
+    int mod = (base & 7) == 4 ? 2 : (base & 7) == 5 ? 1 : 0;
+    e8(x, 0x48 | ((dst & 8) ? 4 : 0) | ((idxreg & 8) ? 2 : 0) | ((base & 8) ? 1 : 0));
+    e8(x, digit ? 0x2B : 0x03);              /* sub / add r64, r/m64 */
+    e8(x, (mod << 6) | ((dst & 7) << 3) | 0x04);
+    e8(x, (sb << 6) | ((idxreg & 7) << 3) | (base & 7));
+    if (mod == 2) e32(x, 0);
+    else if (mod == 1) e8(x, 0);
+}
+
+/* dst OP= [base + disp32], 64-bit. */
+static void i_alu_reg_mem_disp(X *x, int digit, int dst, int base, int32_t disp) {
+    e8(x, 0x48 | ((dst & 8) ? 4 : 0) | ((base & 8) ? 1 : 0));
+    e8(x, digit ? 0x2B : 0x03);
+    if ((base & 7) == 4) {
+        e8(x, 0x84);                          /* mod=10, rm=100 (SIB) */
+        e8(x, 0x24);                          /* no index, base rsp/r12 */
+    } else {
+        e8(x, 0x80 | (base & 7));
+    }
+    e32(x, disp);
+}
+
+/* mov r64, imm64 (movabs) */
+static void i_mov_reg_imm64(X *x, int reg, uint64_t v) {
+    rex_w(x, 0, reg);
+    e8(x, 0xB8 + (reg & 7));
+    e64(x, (int64_t)v);
+}
+/* dst OP= src, both 64-bit */
+static void i_xor_reg_reg(X *x, int dst, int src) {
+    rex_w(x, src, dst); e8(x, 0x31); modrm_rr(x, src, dst);
+}
+static void i_sub_reg_reg(X *x, int dst, int src) {
+    rex_w(x, src, dst); e8(x, 0x29); modrm_rr(x, src, dst);
+}
+static void i_add_reg_reg(X *x, int dst, int src) {
+    rex_w(x, src, dst); e8(x, 0x01); modrm_rr(x, src, dst);
+}
+/* reg OP= imm32 */
+static void i_alu_reg_imm(X *x, int op, int reg, int64_t v) {
+    rex_w(x, 0, reg);
+    if (imm8_ok(v)) { e8(x, 0x83); modrm_rr(x, op, reg); e8(x, v & 0xFF); }
+    else            { e8(x, 0x81); modrm_rr(x, op, reg); e32(x, (int32_t)v); }
+}
+static void i_and_reg_imm(X *x, int reg, int64_t v) { i_alu_reg_imm(x, 4, reg, v); }
+static void i_inc_reg(X *x, int reg) { rex_w(x, 0, reg); e8(x, 0xFF); modrm_rr(x, 0, reg); }
+static void i_dec_reg(X *x, int reg) { rex_w(x, 0, reg); e8(x, 0xFF); modrm_rr(x, 1, reg); }
+static void i_neg_reg(X *x, int reg) { rex_w(x, 0, reg); e8(x, 0xF7); modrm_rr(x, 3, reg); }
+static void i_sar_reg_imm(X *x, int reg, int imm) {
+    rex_w(x, 0, reg); e8(x, 0xC1); modrm_rr(x, 7, reg); e8(x, imm & 0x3F);
+}
+static void i_not_reg(X *x, int reg) {
+    rex_w(x, 0, reg); e8(x, 0xF7); modrm_rr(x, 2, reg);
+}
+/* unsigned rdx:rax = rax * src */
+static void i_mul_reg(X *x, int src) {
+    rex_w(x, 0, src); e8(x, 0xF7); modrm_rr(x, 4, src);
+}
+/* signed rdx:rax = rax * src */
+static void i_imul_rax_reg(X *x, int src) {
+    rex_w(x, 0, src); e8(x, 0xF7); modrm_rr(x, 5, src);
+}
+/* imul dst, dst, imm32 */
+static void i_imul_reg_imm(X *x, int reg, int64_t v) {
+    rex_w(x, reg, reg); e8(x, 0x69); modrm_rr(x, reg, reg); e32(x, (int32_t)v);
+}
+/* flags for a - b */
+static void i_cmp_reg_reg(X *x, int a, int b) {
+    rex_w(x, b, a); e8(x, 0x39); modrm_rr(x, b, a);
+}
+/* flags for reg - imm32 */
+static void i_cmp_reg_imm(X *x, int reg, int64_t v) {
+    rex_w(x, 0, reg);
+    if (imm8_ok(v)) { e8(x, 0x83); modrm_rr(x, 7, reg); e8(x, v & 0xFF); }
+    else            { e8(x, 0x81); modrm_rr(x, 7, reg); e32(x, (int32_t)v); }
+}
+static void i_push_reg(X *x, int reg) {
+    rex_nw(x, 0, reg);
+    e8(x, 0x50 + (reg & 7));
+}
+static void i_pop_reg(X *x, int reg) {
+    rex_nw(x, 0, reg);
+    e8(x, 0x58 + (reg & 7));
+}
+
 /* condition codes */
 enum { CC_E = 4, CC_NE = 5, CC_B = 2, CC_AE = 3, CC_L = 0xC, CC_GE = 0xD,
        CC_LE = 0xE, CC_G = 0xF };
@@ -374,6 +551,12 @@ static int new_label(X *x) {
 }
 static void place_label(X *x, int l) {
     if (l >= 0 && l < XV_MAX_LABEL) x->label_pos[l] = x->code.len;
+}
+/* Pad to a 16-byte boundary before a hot loop head. The image starts at
+   XV_CODE_VA, which is itself 16-byte aligned, so the code offset is the
+   in-page alignment. */
+static void align_loop(X *x) {
+    while (x->code.len % 16) e8(x, 0x90);
 }
 static void add_cfix(X *x, int at, int lbl) {
     if (x->ncfix >= XV_MAX_FIX) {
@@ -426,6 +609,82 @@ static void i_lea_data(X *x, int doff) {
     e8(x, 0x48); e8(x, 0x8D); e8(x, 0x05);
     int at = x->code.len; e32(x, 0);
     add_dfx(x, at, doff);
+}
+
+/* mod=00, rm=101: RIP-relative operand, displacement fixed up later. */
+static void modrm_rip(X *x, int reg, int doff) {
+    e8(x, ((reg & 7) << 3) | 5);
+    int at = x->code.len; e32(x, 0);
+    add_dfx(x, at, doff);
+}
+
+/* typed load into an arbitrary register from a global: reg = [rip+doff] */
+static void i_load_data_reg(X *x, int reg, int doff, Type *t) {
+    if (t->kind == TY_BOOL || t->kind == TY_BYTE) {
+        rex_nw(x, reg, 0);
+        e8(x, 0x0F); e8(x, 0xB6); modrm_rip(x, reg, doff);
+    } else if (t->size == 8) {
+        rex_w(x, reg, 0); e8(x, 0x8B); modrm_rip(x, reg, doff);
+    } else {
+        rex_w(x, reg, 0); e8(x, 0x63); modrm_rip(x, reg, doff);
+    }
+}
+/* typed store from an arbitrary register to a global: [rip+doff] = reg */
+static void i_store_data_reg(X *x, int doff, Type *t, int reg) {
+    if (t->kind == TY_BOOL || t->kind == TY_BYTE) {
+        rex_nw(x, reg, 0);
+        e8(x, 0x88); modrm_rip(x, reg, doff);
+    } else if (t->size == 8) {
+        rex_w(x, reg, 0);
+        e8(x, 0x89); modrm_rip(x, reg, doff);
+    } else {
+        rex_nw(x, reg, 0);
+        e8(x, 0x89); modrm_rip(x, reg, doff);
+    }
+}
+
+/* Read-modify-write on a variable slot, used for `x = x + 1` and friends.
+   `global` selects the RIP-relative encoding; otherwise the slot is
+   rbp-relative. */
+static void i_alu_slot_imm(X *x, bool global, int doff, Type *t,
+                           int digit, int64_t v) {
+    int bytes = (t->kind == TY_BOOL || t->kind == TY_BYTE) ? 1
+              : (t->size == 8 ? 8 : 4);
+    if (bytes == 1) {
+        e8(x, 0x80);
+        if (global) modrm_rip(x, digit, doff);
+        else modrm_mem(x, digit, 5, -doff);
+        e8(x, (int)(v & 0xFF));
+        return;
+    }
+    if (bytes == 8) e8(x, 0x48);
+    if (imm8_ok(v)) {
+        e8(x, 0x83);
+        if (global) modrm_rip(x, digit, doff);
+        else modrm_mem(x, digit, 5, -doff);
+        e8(x, (int)(v & 0xFF));
+    } else {
+        e8(x, 0x81);
+        if (global) modrm_rip(x, digit, doff);
+        else modrm_mem(x, digit, 5, -doff);
+        e32(x, (int32_t)v);
+    }
+}
+static void i_inc_slot(X *x, bool global, int doff, Type *t) {
+    int bytes = (t->kind == TY_BOOL || t->kind == TY_BYTE) ? 1
+              : (t->size == 8 ? 8 : 4);
+    if (bytes == 8) e8(x, 0x48);
+    e8(x, bytes == 1 ? 0xFE : 0xFF);
+    if (global) modrm_rip(x, 0, doff);
+    else modrm_mem(x, 0, 5, -doff);
+}
+static void i_dec_slot(X *x, bool global, int doff, Type *t) {
+    int bytes = (t->kind == TY_BOOL || t->kind == TY_BYTE) ? 1
+              : (t->size == 8 ? 8 : 4);
+    if (bytes == 8) e8(x, 0x48);
+    e8(x, bytes == 1 ? 0xFE : 0xFF);
+    if (global) modrm_rip(x, 1, doff);
+    else modrm_mem(x, 1, 5, -doff);
 }
 
 /* ─────────────────────────────────────────────
@@ -502,8 +761,8 @@ static void scope_push(void) {
 static void scope_pop(void) {
     if (g_nscope > 0) g_nlocals = g_scope[--g_nscope];
 }
-static void push_var(const char *name, Type *ty, bool is_array, int count, int off, bool global) {
-    if (g_nlocals >= XV_MAX_VAR) return;
+static Var *push_var(const char *name, Type *ty, bool is_array, int count, int off, bool global) {
+    if (g_nlocals >= XV_MAX_VAR) return NULL;
     Var *v = &g_locals[g_nlocals++];
     memset(v, 0, sizeof *v);
     snprintf(v->name, sizeof v->name, "%s", name ? name : "_v");
@@ -512,6 +771,75 @@ static void push_var(const char *name, Type *ty, bool is_array, int count, int o
     v->count = count;
     v->off = off;
     v->global = global;
+    return v;
+}
+
+/* ─────────────────────────────────────────────
+   Static register allocation for scalar locals
+
+   Up to four 8-byte locals per function live in callee-saved registers
+   (r12–r15) for their whole lifetime. Callees preserve them, so calls
+   need no spill; control-flow joins need no reconciliation. Address-taken
+   variables stay in memory.
+   ───────────────────────────────────────────── */
+#define XV_MAX_CACHE 4
+static const int CACHE_REGS[XV_MAX_CACHE] = { 12, 13, 14, 15 };
+
+static Type *type_from_name(X *x, const char *n);
+
+typedef struct { ASTNode *decl; int reg; } RegAssign;
+static RegAssign g_regmap[128];
+static int g_nregmap;
+static int g_nextreg;
+
+static bool scalar_reg_type(Type *t) {
+    return t && t->size == 8 &&
+           (t->kind == TY_I64 || t->kind == TY_PTR || t->kind == TY_STR);
+}
+
+static bool addr_taken_in(ASTNode *n, const char *name) {
+    if (!n) return false;
+    if (n->kind == NODE_EXPR_REF && n->children.count > 0) {
+        ASTNode *c = n->children.items[0];
+        if (c && c->kind == NODE_IDENT && c->sval && !strcmp(c->sval, name))
+            return true;
+    }
+    for (int i = 0; i < n->children.count; i++)
+        if (addr_taken_in(n->children.items[i], name)) return true;
+    return false;
+}
+
+static int reg_for_node(ASTNode *n) {
+    for (int i = 0; i < g_nregmap; i++)
+        if (g_regmap[i].decl == n) return g_regmap[i].reg;
+    return 0;
+}
+
+static int cache_add(ASTNode *decl) {
+    if (g_nregmap >= (int)(sizeof g_regmap / sizeof g_regmap[0])) return 0;
+    if (g_nextreg >= XV_MAX_CACHE) return 0;
+    int reg = CACHE_REGS[g_nextreg++];
+    g_regmap[g_nregmap].decl = decl;
+    g_regmap[g_nregmap].reg = reg;
+    g_nregmap++;
+    return reg;
+}
+
+static void cache_walk(X *x, ASTNode *n, ASTNode *body) {
+    if (!n) return;
+    if ((n->kind == NODE_VAR_DECL || n->kind == NODE_PTR_DECL) &&
+        n->sval && n->ival == 0) {
+        Type *t = NULL;
+        if (n->kind == NODE_PTR_DECL) {
+            t = mk_ptr(type_from_name(x, n->type_name ? n->type_name : "byte"));
+        } else if (n->type_name && strcmp(n->type_name, "auto") != 0) {
+            t = type_from_name(x, n->type_name);
+        }
+        if (scalar_reg_type(t) && !addr_taken_in(body, n->sval))
+            cache_add(n);
+    }
+    for (int i = 0; i < n->children.count; i++)
+        cache_walk(x, n->children.items[i], body);
 }
 
 /* ─────────────────────────────────────────────
@@ -749,6 +1077,7 @@ static Type *etype(X *x, ASTNode *n) {
 static void gen_stmt(X *x, ASTNode *n);
 static void gen_expr(X *x, ASTNode *n);
 static void gen_addr(X *x, ASTNode *n);
+static bool leaf_to_reg(X *x, ASTNode *n, int reg);
 
 static int temp_disp(X *x, int i) { return -x->frame + 8 * i; }
 
@@ -810,23 +1139,51 @@ static void gen_addr(X *x, ASTNode *n) {
     case NODE_EXPR_INDEX: {
         if (n->children.count < 2) { xfail(x, n->line, "malformed index expression"); return; }
         ASTNode *base = n->children.items[0];
+        ASTNode *idx = n->children.items[1];
         Type *bt = etype(x, base);
         Type *elem = is_ptr_like(bt) ? (bt->base ? bt->base : &ty_byte) : &ty_int;
         int esz = elem->size > 0 ? elem->size : 1;
 
         int t = x->temp_depth++;
+        /* A simple base loads without touching rcx, so a leaf index can
+           go straight into the SIB and skip the address temporary. */
+        if (base->kind == NODE_IDENT && find_var(base->sval) &&
+            (esz == 1 || esz == 2 || esz == 4 || esz == 8)) {
+            Var *iv = idx->kind == NODE_IDENT ? find_var(idx->sval) : NULL;
+            if (iv && iv->reg && !iv->is_array && (iv->reg & 7) != 4) {
+                gen_addr_base(x, base);
+                if (x->failed) { x->temp_depth = t; return; }
+                i_lea_rax_reg_index(x, iv->reg, esz);
+                x->temp_depth = t;
+                return;
+            }
+            if (leaf_to_reg(x, idx, 1)) {
+                gen_addr_base(x, base);
+                if (x->failed) { x->temp_depth = t; return; }
+                i_lea_rax_base_rcx(x, esz);
+                x->temp_depth = t;
+                return;
+            }
+        }
+
         gen_addr_base(x, base);
         if (x->failed) { x->temp_depth = t; return; }
         temp_store(x, t);
 
-        gen_expr(x, n->children.items[1]);
+        gen_expr(x, idx);
         if (x->failed) { x->temp_depth = t; return; }
-        i_mov_reg_reg(x, 1, 0);           /* rcx = index */
-        i_mov_rax_imm(x, esz);            /* rax = elem size */
-        i_imul(x);                        /* rax = index * size */
-        temp_load_rcx(x, t);              /* rcx = base */
-        e8(x, 0x48); e8(x, 0x01); e8(x, 0xC1); /* add rcx, rax */
-        i_mov_reg_reg(x, 0, 1);           /* rax = rcx */
+        if (esz == 1 || esz == 2 || esz == 4 || esz == 8) {
+            /* rax = index, rcx = base; one LEA with a scale factor. */
+            temp_load_rcx(x, t);
+            i_lea_rax_rcx_index(x, esz);
+        } else {
+            i_mov_reg_reg(x, 1, 0);           /* rcx = index */
+            i_mov_rax_imm(x, esz);            /* rax = elem size */
+            i_imul(x);                        /* rax = index * size */
+            temp_load_rcx(x, t);              /* rcx = base */
+            e8(x, 0x48); e8(x, 0x01); e8(x, 0xC1); /* add rcx, rax */
+            i_mov_reg_reg(x, 0, 1);           /* rax = rcx */
+        }
         x->temp_depth = t;
         return;
     }
@@ -931,6 +1288,192 @@ static bool is_cmp_op(const char *op) {
            !strcmp(op, "<=") || !strcmp(op, ">") || !strcmp(op, ">=");
 }
 
+/* Condition code for `lhs OP rhs`, matching i_cmp_rax_rcx's operand order. */
+static int cmp_cc(const char *op) {
+    if (!strcmp(op, "==")) return CC_E;
+    if (!strcmp(op, "!=")) return CC_NE;
+    if (!strcmp(op, "<"))  return CC_L;
+    if (!strcmp(op, "<=")) return CC_LE;
+    if (!strcmp(op, ">"))  return CC_G;
+    return CC_GE;
+}
+static int cc_inv(int cc) {
+    switch (cc) {
+    case CC_E:  return CC_NE;
+    case CC_NE: return CC_E;
+    case CC_L:  return CC_GE;
+    case CC_GE: return CC_L;
+    case CC_LE: return CC_G;
+    case CC_G:  return CC_LE;
+    case CC_B:  return CC_AE;
+    case CC_AE: return CC_B;
+    default:    return cc;
+    }
+}
+
+/* True when `n` is a literal that fits a sign-extended imm32. */
+static bool leaf_imm(ASTNode *n, int64_t *out) {
+    if (!n) return false;
+    if (n->kind == NODE_LITERAL_INT) {
+        if (!imm32_ok(n->ival)) return false;
+        *out = n->ival;
+        return true;
+    }
+    if (n->kind == NODE_LITERAL_BOOL) {
+        *out = n->bval ? 1 : 0;
+        return true;
+    }
+    return false;
+}
+
+/* Materialise a side-effect-free operand into `reg` without touching rax
+   and without control flow. Enum constants are left to gen_expr. */
+static bool leaf_to_reg(X *x, ASTNode *n, int reg) {
+    if (!n) return false;
+    if (n->kind == NODE_LITERAL_INT) {
+        if (!imm32_ok(n->ival)) return false;
+        i_mov_reg_imm(x, reg, n->ival);
+        return true;
+    }
+    if (n->kind == NODE_LITERAL_BOOL) {
+        i_mov_reg_imm(x, reg, n->bval ? 1 : 0);
+        return true;
+    }
+    if (n->kind == NODE_IDENT) {
+        Var *v = find_var(n->sval);
+        if (!v || v->is_array) return false;
+        if (v->reg) i_mov_reg_reg(x, reg, v->reg);
+        else if (v->global) i_load_data_reg(x, reg, v->off, v->ty);
+        else i_load_slot_reg(x, reg, v->off, v->ty);
+        return true;
+    }
+    return false;
+}
+
+/* Round-up magic for signed division by a positive constant.
+   With p = 64 + shift and M = floor(2^p / d) + 1, the error
+   e = M*d - 2^p must satisfy 1 <= e <= 2^(shift+1). Since |n| <= 2^63,
+   n*e/(d*2^p) <= 1/d, so the fractional parts of n/d and of n*M/2^p
+   sum to at most 1 and the multiply-high quotient is exact for both
+   signs. |d| must be >= 2 (powers of two are shifted instead). */
+static bool signed_magic(uint64_t d, int *shift, uint64_t *magic) {
+#if defined(__SIZEOF_INT128__)
+    for (int s = 0; s <= 62; s++) {
+        u128 p2 = ((u128)1) << (64 + s);
+        u128 m = p2 / (u128)d + 1;
+        if (m >= ((u128)1 << 64)) continue;
+        u128 e = m * (u128)d - p2;
+        if (e == 0 || e > (((u128)1) << (s + 1))) continue;
+        *shift = s;
+        *magic = (uint64_t)m;
+        return true;
+    }
+#endif
+    return false;
+}
+
+/* Exact signed `rax / d` and `rax % d` for a compile-time divisor.
+   Returns false when no cheap sequence applies, so the caller can fall
+   back to idiv. */
+static bool gen_const_divmod(X *x, int64_t d, bool want_rem) {
+    uint64_t dabs = d < 0 ? (uint64_t)(-(d + 1)) + 1 : (uint64_t)d;
+    if (dabs < 2) return false;
+
+    bool pow2 = (dabs & (dabs - 1)) == 0;
+    int shift = 0;
+    uint64_t magic = 0;
+    if (pow2) {
+        while (((uint64_t)1 << shift) < dabs) shift++;
+    } else if (!signed_magic(dabs, &shift, &magic)) {
+        return false;
+    }
+
+    i_mov_reg_reg(x, 8, 0);                  /* r8 = n */
+    i_mov_reg_reg(x, 9, 0);
+    i_sar_reg_imm(x, 9, 63);                 /* r9 = sign(n) */
+
+    if (pow2) {
+        /* trunc(n / 2^k) = (n + (n<0 ? 2^k-1 : 0)) >> k */
+        i_and_reg_imm(x, 9, (int64_t)(dabs - 1));
+        i_add_reg_reg(x, 0, 9);
+        i_sar_reg_imm(x, 0, shift);
+    } else {
+        i_mov_reg_imm64(x, 11, magic);
+        i_imul_rax_reg(x, 11);               /* rdx = high half, signed */
+        if (magic >> 63) i_add_reg_reg(x, 2, 8);  /* undo the -n*2^64 */
+        if (shift) i_sar_reg_imm(x, 2, shift);
+        i_mov_reg_reg(x, 0, 2);
+        i_sub_reg_reg(x, 0, 9);              /* q -= sign(n) */
+    }
+    if (d < 0) i_neg_reg(x, 0);
+    if (want_rem) {
+        i_imul_rax_imm(x, d);                /* q * d */
+        i_sub_reg_reg(x, 8, 0);              /* r8 = n - q*d */
+        i_mov_reg_reg(x, 0, 8);
+    }
+    return true;
+}
+
+/* rax already holds the left operand. Computes `rax OP rhs`; `scale` is
+   the pointer element size for pointer +/- (1 means no scaling). */
+static void gen_binop_from_rax(X *x, const char *op, Type *lt,
+                               ASTNode *rhs, int scale, int line) {
+    int64_t iv;
+    if (scale == 1 && leaf_imm(rhs, &iv)) {
+        if ((!strcmp(op, "/") || !strcmp(op, "%")) && iv != 0 &&
+            iv >= -2147483647LL && iv <= 2147483647LL &&
+            gen_const_divmod(x, iv, !strcmp(op, "%"))) {
+            return;
+        }
+        if (!strcmp(op, "+"))  { i_add_rax_imm(x, iv); return; }
+        if (!strcmp(op, "-"))  { i_sub_rax_imm(x, iv); return; }
+        if (!strcmp(op, "*"))  { i_imul_rax_imm(x, iv); return; }
+        if (!strcmp(op, "&"))  { i_and_rax_imm(x, iv); return; }
+        if (!strcmp(op, "|"))  { i_or_rax_imm(x, iv); return; }
+        if (!strcmp(op, "^"))  { i_xor_rax_imm(x, iv); return; }
+        if (!strcmp(op, "<<")) { i_shl_rax_imm(x, iv); return; }
+        if (!strcmp(op, ">>")) {
+            if (lt->kind == TY_I64 || lt->kind == TY_INT) i_sar_rax_imm(x, iv);
+            else i_shr_rax_imm(x, iv);
+            return;
+        }
+        if (is_cmp_op(op)) { i_cmp_rax_imm(x, iv); i_setcc(x, cmp_cc(op)); return; }
+        /* / and % have no immediate form; fall through to rcx. */
+    }
+    if (scale == 1 && leaf_to_reg(x, rhs, 1)) {
+        /* rcx already holds the right operand. */
+    } else {
+        int t = x->temp_depth++;
+        temp_store(x, t);
+        gen_expr(x, rhs);
+        if (x->failed) { x->temp_depth = t; return; }
+        if (scale != 1) {
+            i_mov_reg_reg(x, 1, 0);
+            i_mov_rax_imm(x, scale);
+            i_imul(x);
+        }
+        i_mov_reg_reg(x, 1, 0);     /* rcx = rhs */
+        temp_load_rax(x, t);        /* rax = lhs */
+        x->temp_depth = t;
+    }
+
+    if (!strcmp(op, "+"))  { i_add(x); return; }
+    if (!strcmp(op, "-"))  { i_sub(x); return; }
+    if (!strcmp(op, "*"))  { i_imul(x); return; }
+    if (!strcmp(op, "%"))  { i_idiv(x); i_mod_rax(x); return; }
+    if (!strcmp(op, "/"))  { i_idiv(x); return; }
+    if (!strcmp(op, "&"))  { i_and(x); return; }
+    if (!strcmp(op, "|"))  { i_or(x); return; }
+    if (!strcmp(op, "^"))  { i_xor(x); return; }
+    if (!strcmp(op, "<<")) { i_shl(x); return; }
+    if (!strcmp(op, ">>")) {
+        if (lt->kind == TY_I64 || lt->kind == TY_INT) i_sar(x); else i_shr(x);
+        return;
+    }
+    if (is_cmp_op(op)) { i_cmp_rax_rcx(x); i_setcc(x, cmp_cc(op)); return; }
+    xfail(x, line, "operator '%s' is not supported by the native backend", op);
+}
+
 static void gen_binop(X *x, ASTNode *n) {
     if (n->children.count < 2) { xfail(x, n->line, "malformed binary expression"); return; }
     const char *op = n->op ? n->op : "+";
@@ -961,52 +1504,97 @@ static void gen_binop(X *x, ASTNode *n) {
     Type *lt = etype(x, lhs);
     bool ptr_arith = is_ptr_like(lt) &&
                      (!strcmp(op, "+") || !strcmp(op, "-"));
+    int scale = 1;
+    if (ptr_arith)
+        scale = (lt->base && lt->base->size > 0) ? lt->base->size : 1;
 
     int t = x->temp_depth++;
     gen_expr(x, lhs);
     if (x->failed) { x->temp_depth = t; return; }
-    temp_store(x, t);
-    gen_expr(x, rhs);
-    if (x->failed) { x->temp_depth = t; return; }
+    gen_binop_from_rax(x, op, lt, rhs, scale, n->line);
+    x->temp_depth = t;
+}
 
-    if (ptr_arith) {
-        /* scale the integer operand by the pointee size */
-        int esz = (lt->base && lt->base->size > 0) ? lt->base->size : 1;
-        if (esz != 1) {
-            i_mov_reg_reg(x, 1, 0);
-            i_mov_rax_imm(x, esz);
-            i_imul(x);
+/* Jump to `target` if the condition evaluates as requested. Comparisons
+   compile straight to flags + jcc instead of materialising 0/1 and
+   testing it again; && and || short-circuit without temporaries. */
+static void gen_cond_jump(X *x, ASTNode *n, int target, bool jump_if_true) {
+    if (!n || x->failed) return;
+
+    if (n->kind == NODE_EXPR_UNOP && n->op && !strcmp(n->op, "!") &&
+        n->children.count > 0) {
+        gen_cond_jump(x, n->children.items[0], target, !jump_if_true);
+        return;
+    }
+
+    if (n->kind == NODE_EXPR_BINOP && n->op && n->children.count >= 2) {
+        const char *op = n->op;
+        bool is_and = !strcmp(op, "&&");
+        bool is_or  = !strcmp(op, "||");
+        if (is_and || is_or) {
+            /* Both-jump form when the result requested is the short-circuit
+               value: every operand that decides it jumps to target. */
+            if (jump_if_true != is_and) {
+                gen_cond_jump(x, n->children.items[0], target, jump_if_true);
+                gen_cond_jump(x, n->children.items[1], target, jump_if_true);
+            } else {
+                int skip = new_label(x);
+                gen_cond_jump(x, n->children.items[0], skip, !jump_if_true);
+                gen_cond_jump(x, n->children.items[1], target, jump_if_true);
+                place_label(x, skip);
+            }
+            return;
+        }
+        if (is_cmp_op(op)) {
+            ASTNode *lhs = n->children.items[0];
+            ASTNode *rhs = n->children.items[1];
+            int t = x->temp_depth++;
+            int64_t iv;
+            int cc = cmp_cc(op);
+
+            /* Compare a register-cached local in place. */
+            Var *lv = lhs->kind == NODE_IDENT ? find_var(lhs->sval) : NULL;
+            if (lv && lv->reg && !lv->is_array) {
+                Var *rv = rhs->kind == NODE_IDENT ? find_var(rhs->sval) : NULL;
+                if (leaf_imm(rhs, &iv)) {
+                    i_cmp_reg_imm(x, lv->reg, iv);
+                } else if (rv && rv->reg && !rv->is_array) {
+                    i_cmp_reg_reg(x, lv->reg, rv->reg);
+                } else {
+                    gen_expr(x, rhs);
+                    if (x->failed) { x->temp_depth = t; return; }
+                    i_mov_reg_reg(x, 1, 0);
+                    i_cmp_reg_reg(x, lv->reg, 1);
+                }
+                x->temp_depth = t;
+                i_jcc(x, jump_if_true ? cc : cc_inv(cc), target);
+                return;
+            }
+
+            gen_expr(x, lhs);
+            if (x->failed) { x->temp_depth = t; return; }
+            if (leaf_imm(rhs, &iv)) {
+                i_cmp_rax_imm(x, iv);
+            } else if (leaf_to_reg(x, rhs, 1)) {
+                i_cmp_rax_rcx(x);
+            } else {
+                temp_store(x, t);
+                gen_expr(x, rhs);
+                if (x->failed) { x->temp_depth = t; return; }
+                i_mov_reg_reg(x, 1, 0);
+                temp_load_rax(x, t);
+                i_cmp_rax_rcx(x);
+            }
+            x->temp_depth = t;
+            i_jcc(x, jump_if_true ? cc : cc_inv(cc), target);
+            return;
         }
     }
 
-    i_mov_reg_reg(x, 1, 0);     /* rcx = rhs */
-    temp_load_rax(x, t);        /* rax = lhs */
-    x->temp_depth = t;
-
-    if (!strcmp(op, "+"))  { i_add(x); return; }
-    if (!strcmp(op, "-"))  { i_sub(x); return; }
-    if (!strcmp(op, "*"))  { i_imul(x); return; }
-    if (!strcmp(op, "%"))  { i_idiv(x); i_mod_rax(x); return; }
-    if (!strcmp(op, "/"))  { i_idiv(x); return; }
-    if (!strcmp(op, "&"))  { i_and(x); return; }
-    if (!strcmp(op, "|"))  { i_or(x); return; }
-    if (!strcmp(op, "^"))  { i_xor(x); return; }
-    if (!strcmp(op, "<<")) { i_shl(x); return; }
-    if (!strcmp(op, ">>")) {
-        if (lt->kind == TY_I64 || lt->kind == TY_INT) i_sar(x); else i_shr(x);
-        return;
-    }
-    if (is_cmp_op(op)) {
-        i_cmp_rax_rcx(x);
-        if (!strcmp(op, "==")) i_setcc(x, CC_E);
-        else if (!strcmp(op, "!=")) i_setcc(x, CC_NE);
-        else if (!strcmp(op, "<"))  i_setcc(x, CC_L);
-        else if (!strcmp(op, "<=")) i_setcc(x, CC_LE);
-        else if (!strcmp(op, ">"))  i_setcc(x, CC_G);
-        else                        i_setcc(x, CC_GE);
-        return;
-    }
-    xfail(x, n->line, "operator '%s' is not supported by the native backend", op);
+    gen_expr(x, n);
+    if (x->failed) return;
+    i_test_rax(x);
+    i_jcc(x, jump_if_true ? CC_NE : CC_E, target);
 }
 
 /* ─────────────────────────────────────────────
@@ -1020,6 +1608,37 @@ static void eval_args(X *x, ASTNode *n, const int *regs) {
     int cnt = n->children.count;
     if (cnt > 6) {
         xfail(x, n->line, "native calls support at most 6 arguments (got %d)", cnt);
+        return;
+    }
+    /* One argument cannot clobber another, so skip the temporary. */
+    if (cnt == 1) {
+        ASTNode *a = n->children.items[0];
+        if (a && a->kind == NODE_EXPR_BINOP && a->op && a->children.count >= 2) {
+            bool add = !strcmp(a->op, "+"), sub = !strcmp(a->op, "-");
+            if (add || sub) {
+                ASTNode *l = a->children.items[0], *r = a->children.items[1];
+                Var *lv = l->kind == NODE_IDENT ? find_var(l->sval) : NULL;
+                Var *rv = r->kind == NODE_IDENT ? find_var(r->sval) : NULL;
+                int64_t k = 0;
+                /* v +/- k straight into the argument register. Pointer
+                   arithmetic is left to the general path, which scales. */
+                if (lv && lv->reg && !lv->is_array && !is_ptr_like(lv->ty) &&
+                    leaf_imm(r, &k) && imm32_ok(add ? k : -k)) {
+                    i_mov_reg_reg(x, regs[0], lv->reg);
+                    if (k) i_alu_reg_imm(x, add ? 0 : 5, regs[0], k);
+                    return;
+                }
+                if (add && rv && rv->reg && !rv->is_array && !is_ptr_like(rv->ty) &&
+                    leaf_imm(l, &k) && imm32_ok(k)) {
+                    i_mov_reg_reg(x, regs[0], rv->reg);
+                    if (k) i_alu_reg_imm(x, 0, regs[0], k);
+                    return;
+                }
+            }
+        }
+        gen_expr(x, a);
+        if (x->failed) return;
+        i_mov_reg_reg(x, regs[0], 0);
         return;
     }
     for (int i = 0; i < cnt; i++) {
@@ -1138,6 +1757,17 @@ static void gen_expr(X *x, ASTNode *n) {
             xfail(x, n->line, "unknown variable '%s'", n->sval ? n->sval : "?");
             return;
         }
+        if (v->reg) {
+            i_mov_reg_reg(x, 0, v->reg);
+            return;
+        }
+        if (v->reg) {
+            /* Address-taken locals are never cached, so this is only a
+               safety net: spill first so the address sees the live value. */
+            i_store_slot_reg(x, v->off, v->ty, v->reg);
+            i_lea_mem(x, 0, v->off);
+            return;
+        }
         if (v->is_array) {
             if (v->global) i_lea_data(x, v->off);
             else i_lea_mem(x, 0, v->off);
@@ -1209,10 +1839,8 @@ static void gen_expr(X *x, ASTNode *n) {
     case NODE_EXPR_TERNARY: {
         if (n->children.count < 3) { xfail(x, n->line, "malformed conditional expression"); return; }
         int lelse = new_label(x), lend = new_label(x);
-        gen_expr(x, n->children.items[0]);
+        gen_cond_jump(x, n->children.items[0], lelse, false);
         if (x->failed) return;
-        i_test_rax(x);
-        i_jcc(x, CC_E, lelse);
         gen_expr(x, n->children.items[1]);
         i_jmp(x, lend);
         place_label(x, lelse);
@@ -1414,7 +2042,17 @@ static void gen_var_decl(X *x, ASTNode *n) {
     int off = x->locals_used + bytes;
     x->locals_used = off;
 
-    push_var(n->sval, t, false, 0, off, false);
+    Var *v = push_var(n->sval, t, false, 0, off, false);
+    if (v) v->reg = reg_for_node(n);
+
+    if (v && v->reg) {
+        if (n->children.count > 0) {
+            gen_expr(x, n->children.items[0]);
+            if (x->failed) return;
+            i_mov_reg_reg(x, v->reg, 0);
+        }
+        return;
+    }
 
     if (t->kind == TY_STRUCT) zero_region(x, off, t->size);
 
@@ -1425,6 +2063,36 @@ static void gen_var_decl(X *x, ASTNode *n) {
     }
 }
 
+/* True when evaluating `n` cannot assign, call or otherwise change memory. */
+static bool expr_is_pure(ASTNode *n) {
+    if (!n) return true;
+    switch (n->kind) {
+    case NODE_SET:
+    case NODE_FUNC_CALL:
+    case NODE_ALLOC:
+    case NODE_FREE:
+    case NODE_SEND:
+    case NODE_RECV:
+    case NODE_CHAN_SEND:
+    case NODE_CHAN_RECV:
+    case NODE_THROW:
+    case NODE_AWAIT:
+    case NODE_SPAWN:
+        return false;
+    default:
+        break;
+    }
+    for (int i = 0; i < n->children.count; i++)
+        if (!expr_is_pure(n->children.items[i])) return false;
+    return true;
+}
+
+/* True for `x` itself inside `x = x + c`-shaped right-hand sides. */
+static bool same_ident(ASTNode *n, const char *name) {
+    return n && n->kind == NODE_IDENT && n->sval && name &&
+           !strcmp(n->sval, name);
+}
+
 static void gen_set(X *x, ASTNode *n) {
     if (!n->lhs) {
         xfail(x, n->line, "assignment target could not be resolved natively "
@@ -1433,6 +2101,145 @@ static void gen_set(X *x, ASTNode *n) {
     }
     if (n->children.count < 1) { xfail(x, n->line, "assignment without a value"); return; }
 
+    const char *op = n->op;
+    bool compound = op && *op;
+    ASTNode *rhs = n->children.items[0];
+    Var *lv = (n->lhs->kind == NODE_IDENT) ? find_var(n->lhs->sval) : NULL;
+
+    /* x = x + c / x = c + x / x = x - c becomes a single read-modify-write;
+       loop increments are the dominant case. */
+    if (lv && !lv->is_array && !compound &&
+        rhs->kind == NODE_EXPR_BINOP && rhs->op && rhs->children.count >= 2) {
+        const char *bop = rhs->op;
+        bool add = !strcmp(bop, "+");
+        bool sub = !strcmp(bop, "-");
+        if (add || sub) {
+            ASTNode *a = rhs->children.items[0];
+            ASTNode *b = rhs->children.items[1];
+            ASTNode *other = NULL;
+            int64_t iv;
+            if (same_ident(a, lv->name)) other = b;
+            else if (add && same_ident(b, lv->name)) other = a;
+            if (other && lv->reg) {
+                Var *rv = other->kind == NODE_IDENT ? find_var(other->sval) : NULL;
+                if (rv && rv->reg && !rv->is_array) {
+                    if (add) i_add_reg_reg(x, lv->reg, rv->reg);
+                    else     i_sub_reg_reg(x, lv->reg, rv->reg);
+                    return;
+                }
+            }
+            if (other && leaf_imm(other, &iv)) {
+                int64_t delta = add ? iv : -iv;
+                bool fits = (lv->ty->kind == TY_BOOL || lv->ty->kind == TY_BYTE)
+                            ? imm8_ok(delta) : imm32_ok(delta);
+                if (fits) {
+                    if (delta == 0) return;
+                    if (lv->reg) {
+                        if (delta == 1)       i_inc_reg(x, lv->reg);
+                        else if (delta == -1) i_dec_reg(x, lv->reg);
+                        else i_alu_reg_imm(x, add ? 0 : 5, lv->reg, delta);
+                        return;
+                    }
+                    if (delta == 1)       i_inc_slot(x, lv->global, lv->off, lv->ty);
+                    else if (delta == -1) i_dec_slot(x, lv->global, lv->off, lv->ty);
+                    else                  i_alu_slot_imm(x, lv->global, lv->off,
+                                                         lv->ty, 0, delta);
+                    return;
+                }
+            }
+            /* acc = acc + p[i]: fold the element load into the arithmetic
+               when the address is a cached base plus a cached/constant
+               index. 64-bit elements only; narrower ones would need a
+               separate sign-extending load. */
+            if (other && lv->reg && !is_ptr_like(lv->ty) &&
+                other->kind == NODE_EXPR_INDEX && other->children.count >= 2 &&
+                etype(x, other)->size == 8) {
+                ASTNode *lb = other->children.items[0];
+                ASTNode *li = other->children.items[1];
+                Var *bv = lb->kind == NODE_IDENT ? find_var(lb->sval) : NULL;
+                Var *iv = li->kind == NODE_IDENT ? find_var(li->sval) : NULL;
+                int64_t k = 0;
+                if (bv && bv->reg && !bv->is_array) {
+                    if (iv && iv->reg && !iv->is_array && (iv->reg & 7) != 4) {
+                        i_alu_reg_mem_sib(x, add ? 0 : 1, lv->reg, bv->reg, iv->reg, 8);
+                        return;
+                    }
+                    if (leaf_imm(li, &k) && imm32_ok(k * 8)) {
+                        i_alu_reg_mem_disp(x, add ? 0 : 1, lv->reg, bv->reg, (int32_t)(k * 8));
+                        return;
+                    }
+                }
+            }
+            /* Accumulate an arbitrary expression straight into the cached
+               register. Pure right-hand sides only: a side effect could
+               change `lv` between the two evaluation points. */
+            if (other && lv->reg && !is_ptr_like(lv->ty) && expr_is_pure(other)) {
+                gen_expr(x, other);
+                if (x->failed) return;
+                if (add) i_add_reg_reg(x, lv->reg, 0);
+                else     i_sub_reg_reg(x, lv->reg, 0);
+                return;
+            }
+        }
+    }
+
+    /* Simple variable target: evaluate the value, store straight to the
+       slot (or its register). No address temporary is needed. */
+    if (lv && !lv->is_array) {
+        if (compound) {
+            if (lv->reg) i_mov_reg_reg(x, 0, lv->reg);
+            else if (lv->global) i_load_data_reg(x, 0, lv->off, lv->ty);
+            else i_load_slot(x, lv->off, lv->ty);
+            int scale = 1;
+            if (is_ptr_like(lv->ty) &&
+                (!strcmp(op, "+") || !strcmp(op, "-")))
+                scale = (lv->ty->base && lv->ty->base->size > 0)
+                        ? lv->ty->base->size : 1;
+            int t = x->temp_depth++;
+            gen_binop_from_rax(x, op, lv->ty, rhs, scale, n->line);
+            x->temp_depth = t;
+            if (x->failed) return;
+        } else {
+            gen_expr(x, rhs);
+            if (x->failed) return;
+        }
+        if (lv->reg) i_mov_reg_reg(x, lv->reg, 0);
+        else if (lv->global) i_store_data_reg(x, lv->off, lv->ty, 0);
+        else i_store_slot(x, lv->off, lv->ty);
+        return;
+    }
+
+    /* arr[i] = value with a register base: evaluate the value first, then
+       build the address in rcx. Saves an address temporary on the hot path. */
+    if (!compound && !lv && n->lhs->kind == NODE_EXPR_INDEX &&
+        n->lhs->children.count >= 2 && expr_is_pure(rhs)) {
+        ASTNode *lb = n->lhs->children.items[0];
+        ASTNode *li = n->lhs->children.items[1];
+        Var *bv = lb->kind == NODE_IDENT ? find_var(lb->sval) : NULL;
+        Type *vt = etype(x, n->lhs);
+        int esz = vt->size > 0 ? vt->size : 1;
+        if (bv && bv->reg && !bv->is_array &&
+            (esz == 1 || esz == 2 || esz == 4 || esz == 8)) {
+            Var *iv = li->kind == NODE_IDENT ? find_var(li->sval) : NULL;
+            int64_t k = 0;
+            bool idx_reg = iv && iv->reg && !iv->is_array &&
+                           (iv->reg & 7) != 4;
+            bool idx_imm = !idx_reg && leaf_imm(li, &k);
+            if (idx_reg || idx_imm) {
+                gen_expr(x, rhs);
+                if (x->failed) return;
+                if (idx_reg) {
+                    i_lea_rcx_regs(x, bv->reg, iv->reg, esz);
+                } else {
+                    i_mov_reg_reg(x, 1, bv->reg);
+                    if (k != 0) i_alu_reg_imm(x, 0, 1, k * esz);
+                }
+                i_store_at_rcx(x, vt);
+                return;
+            }
+        }
+    }
+
     Type *t = etype(x, n->lhs);
     int t0 = x->temp_depth++;
 
@@ -1440,39 +2247,40 @@ static void gen_set(X *x, ASTNode *n) {
     if (x->failed) { x->temp_depth = t0; return; }
     temp_store(x, t0);
 
-    const char *op = n->op;
-    int t1 = -1;
-    if (op && *op) {
-        t1 = x->temp_depth++;
-        temp_load_rax(x, t0);
-        i_load_at_rax(x, t);
-        temp_store(x, t1);
+    if (!compound) {
+        /* rax keeps the value; only the address needs reloading. */
+        gen_expr(x, rhs);
+        if (x->failed) { x->temp_depth = t0; return; }
+        temp_load_rcx(x, t0);
+        x->temp_depth = t0;
+        i_store_at_rcx(x, t);
+        return;
     }
 
-    gen_expr(x, n->children.items[0]);
+    int t1 = x->temp_depth++;
+    temp_load_rax(x, t0);
+    i_load_at_rax(x, t);
+    temp_store(x, t1);
+
+    gen_expr(x, rhs);
     if (x->failed) { x->temp_depth = t0; return; }
     int t2 = x->temp_depth++;
     temp_store(x, t2);
 
-    if (op && *op) {
-        temp_load_rax(x, t1);
-        temp_load_rcx(x, t2);
-        if (!strcmp(op, "+")) i_add(x);
-        else if (!strcmp(op, "-")) i_sub(x);
-        else if (!strcmp(op, "*")) i_imul(x);
-        else if (!strcmp(op, "/")) i_idiv(x);
-        else if (!strcmp(op, "%")) { i_idiv(x); i_mod_rax(x); }
-        else if (!strcmp(op, "&")) i_and(x);
-        else if (!strcmp(op, "|")) i_or(x);
-        else if (!strcmp(op, "^")) i_xor(x);
-        else if (!strcmp(op, "<<")) i_shl(x);
-        else if (!strcmp(op, ">>")) i_sar(x);
-        else xfail(x, n->line, "compound operator '%s' is not supported natively", op);
-        x->temp_depth = t0;
-    } else {
-        temp_load_rax(x, t2);
-        x->temp_depth = t0;
-    }
+    temp_load_rax(x, t1);
+    temp_load_rcx(x, t2);
+    if (!strcmp(op, "+")) i_add(x);
+    else if (!strcmp(op, "-")) i_sub(x);
+    else if (!strcmp(op, "*")) i_imul(x);
+    else if (!strcmp(op, "/")) i_idiv(x);
+    else if (!strcmp(op, "%")) { i_idiv(x); i_mod_rax(x); }
+    else if (!strcmp(op, "&")) i_and(x);
+    else if (!strcmp(op, "|")) i_or(x);
+    else if (!strcmp(op, "^")) i_xor(x);
+    else if (!strcmp(op, "<<")) i_shl(x);
+    else if (!strcmp(op, ">>")) i_sar(x);
+    else xfail(x, n->line, "compound operator '%s' is not supported natively", op);
+    x->temp_depth = t0;
 
     temp_load_rcx(x, t0);
     i_store_at_rcx(x, t);
@@ -1480,27 +2288,32 @@ static void gen_set(X *x, ASTNode *n) {
 
 static void gen_if(X *x, ASTNode *n) {
     if (n->children.count < 2) { xfail(x, n->line, "malformed if statement"); return; }
+    bool has_else = n->children.count > 2 && n->children.items[2];
+    if (!has_else) {
+        int lend = new_label(x);
+        gen_cond_jump(x, n->children.items[0], lend, false);
+        if (x->failed) return;
+        gen_stmt(x, n->children.items[1]);
+        place_label(x, lend);
+        return;
+    }
     int lelse = new_label(x), lend = new_label(x);
-    gen_expr(x, n->children.items[0]);
+    gen_cond_jump(x, n->children.items[0], lelse, false);
     if (x->failed) return;
-    i_test_rax(x);
-    i_jcc(x, CC_E, lelse);
     gen_stmt(x, n->children.items[1]);
     i_jmp(x, lend);
     place_label(x, lelse);
-    if (n->children.count > 2 && n->children.items[2])
-        gen_stmt(x, n->children.items[2]);
+    gen_stmt(x, n->children.items[2]);
     place_label(x, lend);
 }
 
 static void gen_loop_while(X *x, ASTNode *n) {
     if (n->children.count < 2) { xfail(x, n->line, "malformed while loop"); return; }
     int top = new_label(x), end = new_label(x);
+    align_loop(x);
     place_label(x, top);
-    gen_expr(x, n->children.items[0]);
+    gen_cond_jump(x, n->children.items[0], end, false);
     if (x->failed) return;
-    i_test_rax(x);
-    i_jcc(x, CC_E, end);
     if (x->nctrl < 64) { x->brk[x->nctrl] = end; x->cont[x->nctrl] = top; x->nctrl++; }
     gen_stmt(x, n->children.items[1]);
     if (x->nctrl > 0) x->nctrl--;
@@ -1522,6 +2335,7 @@ static void gen_loop_count(X *x, ASTNode *n) {
     /* `continue` must still decrement the counter, so the decrement lives at
        its own label rather than at the end of the body. */
     int top = new_label(x), cont = new_label(x), end = new_label(x);
+    align_loop(x);
     place_label(x, top);
     i_load_slot(x, off, &ty_i64);
     i_test_rax(x);
@@ -1795,6 +2609,20 @@ static void gen_function(X *x, ASTNode *fn) {
     Type *save_ret = f->ret;
     int save_nlocals = g_nlocals;
     int save_nscope = g_nscope;
+    int save_nregmap = g_nregmap;
+    int save_nextreg = g_nextreg;
+
+    /* Static register allocation: parameters first, then locals. */
+    g_nregmap = 0;
+    g_nextreg = 0;
+    for (int i = 0; i < np; i++) {
+        ASTNode *p = fn->children.items[i];
+        Type *pt = fn_param_type(x, p);
+        if (scalar_reg_type(pt) && !addr_taken_in(body, p->sval))
+            cache_add(p);
+    }
+    cache_walk(x, body, body);
+    int regs_used = g_nextreg;
 
     int locals = 0;
     for (int i = 0; i < np; i++) {
@@ -1820,6 +2648,7 @@ static void gen_function(X *x, ASTNode *fn) {
     e8(x, 0x48); e8(x, 0x89); e8(x, 0xE5);        /* mov rbp, rsp */
     e8(x, 0x48); e8(x, 0x81); e8(x, 0xEC);        /* sub rsp, frame */
     e32(x, frame);
+    for (int i = 0; i < regs_used; i++) i_push_reg(x, CACHE_REGS[i]);
 
     /* parameters */
     for (int i = 0; i < np; i++) {
@@ -1829,20 +2658,25 @@ static void gen_function(X *x, ASTNode *fn) {
         x->locals_used = align8(x->locals_used);
         int off = x->locals_used + bytes;
         x->locals_used = off;
-        push_var(p->sval, pt, false, 0, off, false);
+        Var *v = push_var(p->sval, pt, false, 0, off, false);
         int argreg = CALL_REGS[i];
-        i_store_slot_reg(x, off, pt, argreg);
+        if (v) v->reg = reg_for_node(p);
+        if (v && v->reg) i_mov_reg_reg(x, v->reg, argreg);
+        else i_store_slot_reg(x, off, pt, argreg);
     }
 
     gen_stmt(x, body);
 
     i_mov_rax_imm(x, 0);
     place_label(x, x->epilogue);
+    for (int i = regs_used - 1; i >= 0; i--) i_pop_reg(x, CACHE_REGS[i]);
     e8(x, 0xC9);                                   /* leave */
     e8(x, 0xC3);                                   /* ret */
 
     g_nscope = save_nscope;
     g_nlocals = save_nlocals;
+    g_nregmap = save_nregmap;
+    g_nextreg = save_nextreg;
     x->frame = save_frame;
     x->locals_used = save_locals;
     x->temp_depth = save_temps;
@@ -1860,6 +2694,13 @@ static void gen_synthetic(X *x, const char *name, ASTNode **stmts, int n, int la
     int save_epi = x->epilogue;
     int save_nlocals = g_nlocals;
     int save_nscope = g_nscope;
+    int save_nregmap = g_nregmap;
+    int save_nextreg = g_nextreg;
+
+    /* Synthetic code takes no cached registers; clearing the map keeps
+       stale entries from a previous function out of this one. */
+    g_nregmap = 0;
+    g_nextreg = 0;
 
     int locals = 0;
     for (int i = 0; i < n; i++) locals += count_locals(x, stmts[i]);
@@ -1890,6 +2731,8 @@ static void gen_synthetic(X *x, const char *name, ASTNode **stmts, int n, int la
 
     g_nscope = save_nscope;
     g_nlocals = save_nlocals;
+    g_nregmap = save_nregmap;
+    g_nextreg = save_nextreg;
     x->frame = save_frame;
     x->locals_used = save_locals;
     x->temp_depth = save_temps;

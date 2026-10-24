@@ -1,8 +1,8 @@
 # Lu v5 — Language Specification
 
-Status: **v0.1 (Phase 1, S3 core)** — normative sections are written against
-`luc 4.7`; gaps found while writing are listed in Annex A instead of being
-papered over.
+Status: **v0.2 (Phase 1, S3 hardening)** — normative sections are written
+against `luc 4.8`; gaps found while writing are listed in Annex A instead of
+being papered over.
 
 This document defines **Lu v5**, the canonical Lu syntax (file header
 `Lu/Strict`). Lu Classic is the frozen legacy syntax; normative differences
@@ -17,7 +17,7 @@ a native freestanding x86-64 ELF writer and a C11 emitter (§11).
 The key words MUST, MUST NOT, MAY are used in the RFC-2119 sense. A MUST
 statement is only used where a test in this repository checks it; the test is
 named in the same paragraph or table. Behaviour described with "does/is" is
-observed on `luc 4.7` but not yet test-linked, and is therefore not a
+observed on `luc 4.8` but not yet test-linked, and is therefore not a
 promise — Annex A tracks the difference.
 
 A **conforming program** is UTF-8 source whose first token is `Lu/Strict` and
@@ -69,7 +69,7 @@ Evidence: `tests/v5/good/01_arith.lu`; session-1 probes (see Annex A).
 
 ### 2.4 String interpolation
 
-**Not part of Lu v5 4.7.** `f"n={n}"` is parsed as identifier `f` followed by
+**Not part of Lu v5 4.8.** `f"n={n}"` is parsed as identifier `f` followed by
 a string and rejected with `undeclared name 'f'`. This section is reserved;
 if interpolation is added it will specify exactly what is interpolable,
 how braces are escaped, and the formatting of numbers and booleans. Tracked
@@ -86,7 +86,7 @@ character ';'"). Evidence: `tests/v5/bad/13_semicolon.lu`.
 
 ## 3. Grammar (EBNF)
 
-This is the accepted surface as of `luc 4.7`, mirroring `SYNTAX.md` §12.
+This is the accepted surface as of `luc 4.8`, mirroring `SYNTAX.md` §12.
 A differential check (parser ↔ grammar) is scheduled in S3.5; divergence is
 tracked as U-10.
 
@@ -176,21 +176,28 @@ Indexing is 0-based; a `str` index yields a `byte` (`s[1]` of `"abc"` is
 
 ### 4.3 Structs and methods
 
-`struct` declares named fields and methods. Private by default; `pub` marks a
-field public. **`pub` is currently documentation only**: the compiler does
-not reject access to a private field from outside the struct (U-05). Methods
-take an explicit `self` parameter; there is no implicit `this` and no
-inheritance. Struct assignment copies the value.
+`struct` declares named fields and methods. Fields are **private by default**;
+`pub` makes a field visible outside the declaring struct. Reading or writing a
+private field anywhere except in a method of the same struct MUST be rejected
+("field 'hp' of 'Hero' is private; declare it 'pub' to use it outside the
+struct"). A method may access private fields of any value whose type is its own
+struct, including through `self`. Methods are always visible. Methods take an
+explicit `self` parameter; there is no implicit `this` and no inheritance.
+Struct assignment copies the value.
 
-Evidence: `tests/v5/good/07_struct.lu`, `tests/v5/good/08_methods.lu`.
+Evidence: `tests/v5/good/07_struct.lu`, `08_methods.lu`, `17_flow.lu`;
+`tests/v5/bad/29_private_field.lu`.
 
 ### 4.4 Pointers and memory
 
 `ptr/T` is a pointer; there is no null pointer value. `Alloc(n)` allocates
-`n` elements of the pointer's target type. `Memset(p, value, n)` and
-`Memcpy(dst, src, n)` operate on bytes. `Del p` frees `p` and makes further
-use of `p` a compile-time error in the same scope ("use of 'p' after Del").
-Double `Del` is an error. Evidence: `tests/v5/good/04_memory.lu`; session-1
+`n` elements of the pointer's target type. A pointer to a struct is
+auto-dereferenced for field access and method calls: `p.field` and
+`p.method()` are equivalent to `p[0].field` and `p[0].method()`.
+`Memset(p, value, n)` and `Memcpy(dst, src, n)` operate on bytes. `Del p`
+frees `p` and makes further use of `p` a compile-time error in the same scope
+("use of 'p' after Del"). Double `Del` is an error. Evidence:
+`tests/v5/good/04_memory.lu`; `examples/v5/test_core_plus.lu`; session-1
 probe.
 
 ### 4.5 Conversions and `auto`
@@ -200,7 +207,7 @@ Conversions are written as calls named by the target type: `int(b)`,
 `int i = b` where `b: byte` is rejected ("implicit conversion byte -> int").
 Evidence: session-1 probe, `tests/v5/bad/03_implicit_byte.lu`.
 
-`auto` is not implemented in 4.7 (U-03); the type annotation is always
+`auto` is not implemented in 4.8 (U-03); the type annotation is always
 required ("missing type for 'x'", `tests/v5/bad/19_missing_type.lu`).
 
 ## 5. Expressions and evaluation order
@@ -234,14 +241,25 @@ sides is **unspecified** (U-09): programs MUST NOT depend on it.
   types MUST have an `else` branch ("match on str needs an else branch");
   `match` on `bool` MAY omit it. `match` on `str` compares content, not
   addresses.
-- `ret e` returns; `ret` without an expression is allowed only in `void`
-  functions. A non-`void` function is **expected** to return on every path,
-  but this is not yet enforced (U-01).
+- `ret e` returns. `ret` without an expression is allowed only in `void`
+  functions ("non-void function must return a value"), and `ret e` is rejected
+  in a `void` function ("void function must not return a value"). A non-`void`
+  function MUST return on every path: falling off the
+  end of the body is rejected ("missing return in non-void function 'f'"). The
+  analysis is structural and conservative: a block returns when its last
+  reachable statement returns; `if`/`else if`/`else` returns when a final
+  `else` exists and every branch returns; `match` returns when it has `else`
+  and every `case` and the `else` return. `while`, `loop` and `for` may run
+  zero times, so a `ret` inside a loop does not count — place a `ret` after the
+  loop. The same rule applies to non-`void` methods ("missing return in
+  non-void method 'S.m'").
 - `Del p` is a statement, not an expression.
 
 Evidence: `tests/v5/good/02_bindings.lu`, `05_pack.lu`, `06_pack_small.lu`,
-`09_fn.lu`; `tests/v5/bad/14_bare_assign.lu`, `17_vid_immutable.lu`,
-`18_shadowing.lu`.
+`09_fn.lu`, `17_flow.lu`; `tests/v5/bad/14_bare_assign.lu`,
+`17_vid_immutable.lu`, `18_shadowing.lu`, `30_missing_return.lu`,
+`31_missing_return_method.lu`, `32_ret_without_value.lu`,
+`33_ret_value_void.lu`.
 
 ## 7. Functions and main
 
@@ -348,15 +366,23 @@ Evidence: `tests/probes/luget/` (Q-02), `tests/v5/good/13_uios.lu`.
 
 ## 12. Deltas from Lu Classic (normative)
 
-These statements are normative for porting; each is observable on `luc 4.7`.
+These statements are normative for porting; each is observable on `luc 4.8`.
 
 | Area | Lu Classic | Lu v5 |
 |---|---|---|
 | Header | `Lu/Language` (or none) | `Lu/Strict` MUST be first token |
-| Declaration | `int x = 0` / `def …` | `vid`/`var` + mandatory `: T` |
+| Metadata | `M/ us *user*`, `Import Russian` | not accepted |
+| Program structure | `#qN` … `#qN:end` blocks execute in source order | code executes only inside `fn main`; top level declares |
+| Statement forms | `Fn/`, `If/`+`To/`+`Else/`, `Loop/N`, `Loop/While`, `Set/`, `Ret/`, `Pr/`, `Call/` | `fn`, `if`/`else` with braces, `loop N`, `while`, `set`, `ret`, `Pr(…)`, call expression |
+| Declarations | `int x = 0` / `def …` | `vid`/`var` + mandatory `: T` |
 | Mutation | bare `x = e` | `set x = e`; `vid` is immutable |
+| Compound assignment | `x += e` | `set x = x + e` |
 | Return | `return e` | `ret e` only |
-| Globals | mutable globals possible | only `vid` globals |
+| Globals | mutable globals possible; `Def:config`/`Def:const` | only top-level `vid` globals |
+| Block reuse | `Def:anw(expr)/Lin` re-runs a matching `#q` block | no equivalent; call a function |
+| Aggregates | `class`, `enum`, inheritance | `struct` only; no `enum`, no inheritance |
+| Methods | implicit `this` | explicit `self` parameter |
+| Heap objects | `new` / `Free` | `Alloc` / `Del` |
 | Types | `float`, `Vector` available | not available (U-03/U-04) |
 | Strings | `str` with library helpers; interpolation absent | `str`, indexing yields `byte`, no concatenation |
 | `match` on `str` | compares addresses | compares content |
@@ -365,6 +391,10 @@ These statements are normative for porting; each is observable on `luc 4.7`.
 | Inline `asm` | supported (C backend) | rejected |
 | Shadowing | allowed | rejected |
 | Implicit conversions | allowed | rejected |
+
+The statement-form and program-structure rows are exercised by the first S4
+port: `examples/classic/example.lu` → `examples/v5/example.lu`
+(`make test-ports`).
 
 Classic is frozen: new features land in v5 only (`docs/meta/classic-freeze.md`).
 
@@ -375,11 +405,9 @@ change plus a test before v1.0.
 
 | ID | Gap | Evidence |
 |---|---|---|
-| U-01 | Non-`void` functions are not checked for a return on every path; a falling-off end returns an undefined value in the native backend | session-1 probe (`missingret` compiles) |
 | U-02 | String interpolation `f"…"` is absent; section 2.4 is reserved | probe: `undeclared name 'f'` |
 | U-03 | `auto` type inference is absent; `SYNTAX.md` mentions it only as an idea | probe: `unknown type 'auto'` |
 | U-04 | `Vector` is not a v5 type; the charter's S3 text asks for its rules | probe: `unknown type 'Vector'` |
-| U-05 | `pub` is not enforced; private fields are writable from outside | probe (`pubpriv` compiles) |
 | U-06 | `dv(&x)` performs a raw binary `read`, not value parsing; `SYNTAX.md` §9 example implies text input | probe: `"42\n"` → `668212` |
 | U-07 | Diagnostics lack column, `rule:`, `note:`, `hint:` lines (chart. App. F) | `src/v5.c` `verr` |
 | U-08 | Native recursion exhausts the stack between 25k and 30k frames with SIGSEGV and no diagnostic | `tests/probes/luget/recursion.lu` |

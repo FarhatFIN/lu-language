@@ -206,7 +206,7 @@ typedef struct {
 
 typedef struct { char *name; Type *ty; bool is_vid; bool freed; } Var;
 
-typedef struct { char *name; Type *ty; } Field;
+typedef struct { char *name; Type *ty; bool is_pub; } Field;
 
 typedef struct {
     char  *name;
@@ -271,9 +271,30 @@ typedef struct {
     int   loop_kind[64];
     char *loop_inc[64];
     int   nloop;
+
+    /* struct whose method body is being emitted; private fields are visible
+       only while this is the struct that declares them */
+    Struct *cur_struct;
+
+    /* result type of the function whose body is being emitted, so `ret` can
+       be checked against it */
+    Type *cur_ret;
 } V5;
 
 /* ─────────────────────────────── utilities ─────────────────────────────── */
+
+static void verr_at(V5 *v, const char *file, int line, const char *fmt, ...)
+{
+    char    msg[400];
+    va_list ap;
+    if (v->failed) return;
+    va_start(ap, fmt);
+    vsnprintf(msg, sizeof msg, fmt, ap);
+    va_end(ap);
+    snprintf(v->err, sizeof v->err, "%s:%d: error: %s",
+             file ? file : v->path, line, msg);
+    v->failed = true;
+}
 
 static void verr(V5 *v, int line, const char *fmt, ...)
 {
@@ -483,6 +504,17 @@ static Pack *pack_of(V5 *v, Type *t)
     if (t->kind == TY_PTR) t = t->base;
     if (t && t->kind == TY_NAMED) return find_pack(v, t->name);
     return NULL;
+}
+
+/* A field is visible outside its struct only when declared `pub`.  The check
+   runs in the emit pass, because the scan pass skips function bodies; while a
+   method body is emitted, `cur_struct` names the struct that may see its own
+   private fields. */
+static void check_field_visible(V5 *v, Struct *s, Field *f, int line)
+{
+    if (!f->is_pub && v->cur_struct != s)
+        verr(v, line, "field '%s' of '%s' is private; declare it 'pub' to use it outside the struct",
+             f->name, s->name);
 }
 
 /* ───────────────────────────── lexer ───────────────────────────────────── */
@@ -734,12 +766,19 @@ static void close_scope(V5 *v)
     nl(v);
 }
 
-static void stmt(V5 *v);
+static bool stmt(V5 *v);
 
-static void body(V5 *v)
+/* True when control cannot fall out of the statement list.  Statements after
+   a guaranteed return are still parsed, but cannot make the block return
+   again. */
+static bool body(V5 *v)
 {
-    while (!v->failed && !at_p(v, "}") && cur(v)->kind != TK_EOF)
-        stmt(v);
+    bool reachable = true;
+    while (!v->failed && !at_p(v, "}") && cur(v)->kind != TK_EOF) {
+        bool returns = stmt(v);
+        if (reachable && returns) reachable = false;
+    }
+    return !reachable;
 }
 /* ───────────────────────── type parsing ───────────────────────────────── */
 
@@ -1231,6 +1270,7 @@ static Type *postfix(V5 *v, Buf *b, Type *t, size_t start)
                          ft->text, st->name);
                     return t;
                 }
+                check_field_visible(v, st, fl, ft->line);
                 buf_puts(b, arrow ? "->" : ".");
                 buf_puts(b, ft->text);
                 t = fl->ty;
@@ -1608,39 +1648,39 @@ static Type *expr(V5 *v, Buf *b) { return binary(v, b, 1); }
 
 static void parse_bind(V5 *v);
 static void parse_set(V5 *v);
-static void parse_if(V5 *v);
+static bool parse_if(V5 *v);
 static void parse_while(V5 *v);
 static void parse_loop(V5 *v);
 static void parse_for(V5 *v);
-static void parse_match(V5 *v);
-static void parse_ret(V5 *v);
+static bool parse_match(V5 *v);
+static bool parse_ret(V5 *v);
 static void parse_del(V5 *v);
 static void parse_pr(V5 *v);
 static void parse_prbits(V5 *v);
 static void parse_memset(V5 *v);
 static void parse_memcpy(V5 *v);
 
-static void stmt(V5 *v)
+static bool stmt(V5 *v)
 {
     Tok *t;
-    if (v->failed) return;
+    if (v->failed) return false;
     t = cur(v);
 
     if (t->kind == TK_ID) {
         const char *s = t->text;
-        if (!strcmp(s, "vid") || !strcmp(s, "var")) { parse_bind(v); return; }
-        if (!strcmp(s, "set"))     { parse_set(v);    return; }
-        if (!strcmp(s, "if"))      { parse_if(v);     return; }
-        if (!strcmp(s, "while"))   { parse_while(v);  return; }
-        if (!strcmp(s, "loop"))    { parse_loop(v);   return; }
-        if (!strcmp(s, "for"))     { parse_for(v);    return; }
-        if (!strcmp(s, "match"))   { parse_match(v);  return; }
-        if (!strcmp(s, "ret"))     { parse_ret(v);    return; }
-        if (!strcmp(s, "Del"))     { parse_del(v);    return; }
-        if (!strcmp(s, "Pr"))      { parse_pr(v);     return; }
-        if (!strcmp(s, "PrBits"))  { parse_prbits(v); return; }
-        if (!strcmp(s, "Memset"))  { parse_memset(v); return; }
-        if (!strcmp(s, "Memcpy"))  { parse_memcpy(v); return; }
+        if (!strcmp(s, "vid") || !strcmp(s, "var")) { parse_bind(v); return false; }
+        if (!strcmp(s, "set"))     { parse_set(v);    return false; }
+        if (!strcmp(s, "if"))      { return parse_if(v); }
+        if (!strcmp(s, "while"))   { parse_while(v);  return false; }
+        if (!strcmp(s, "loop"))    { parse_loop(v);   return false; }
+        if (!strcmp(s, "for"))     { parse_for(v);    return false; }
+        if (!strcmp(s, "match"))   { return parse_match(v); }
+        if (!strcmp(s, "ret"))     { return parse_ret(v); }
+        if (!strcmp(s, "Del"))     { parse_del(v);    return false; }
+        if (!strcmp(s, "Pr"))      { parse_pr(v);     return false; }
+        if (!strcmp(s, "PrBits"))  { parse_prbits(v); return false; }
+        if (!strcmp(s, "Memset"))  { parse_memset(v); return false; }
+        if (!strcmp(s, "Memcpy"))  { parse_memcpy(v); return false; }
         if (!strcmp(s, "break")) {
             int line = t->line;
             Buf b;
@@ -1649,7 +1689,7 @@ static void stmt(V5 *v)
             buf_puts(&b, "break");
             emit_line(v, line, &b);
             free(b.s);
-            return;
+            return false;
         }
         if (!strcmp(s, "continue")) {
             int line = t->line;
@@ -1664,7 +1704,7 @@ static void stmt(V5 *v)
             }
             emit_line(v, line, &b);
             free(b.s);
-            return;
+            return false;
         }
     }
 
@@ -1679,7 +1719,7 @@ static void stmt(V5 *v)
         expr(v, &b);
         emit_line(v, line, &b);
         free(b.s);
-        return;
+        return false;
     }
 
     if (t->kind == TK_ID && peek(v, 1)->kind == TK_PUNCT &&
@@ -1688,10 +1728,11 @@ static void stmt(V5 *v)
             verr(v, t->line, "assignment to '%s' requires 'set'", t->text);
         else
             verr(v, t->line, "undeclared name '%s'", t->text);
-        return;
+        return false;
     }
 
     verr(v, t->line, "unexpected token '%s'", t->text);
+    return false;
 }
 
 /* array literal: [ e1, e2, ... ] */
@@ -1900,6 +1941,7 @@ static void parse_place(V5 *v, Place *pl)
                          ft->text, st->name);
                     break;
                 }
+                check_field_visible(v, st, fl, ft->line);
                 t = fl->ty;
             } else {
                 t = &ty_int;
@@ -1979,24 +2021,26 @@ static void parse_set(V5 *v)
     free(pl.pack_base);
 }
 
-static void parse_if(V5 *v)
+static bool parse_if(V5 *v)
 {
     int line = cur(v)->line;
     Buf cond, head;
     Type *ct;
+    bool all_return = true;
+    bool has_else = false;
 
     memset(&cond, 0, sizeof cond);
     memset(&head, 0, sizeof head);
     adv(v);
     ct = expr(v, &cond);
     require_bool(v, ct, line);
-    if (v->failed) { free(cond.s); return; }
+    if (v->failed) { free(cond.s); return false; }
     buf_puts(&head, "if ");
     buf_add(&head, cond.s, cond.len);
     free(cond.s);
 
     open_block(v, &head, line);
-    body(v);
+    all_return = body(v);
 
     while (!v->failed && at_p(v, "}") &&
            peek(v, 1)->kind == TK_ID && !strcmp(peek(v, 1)->text, "else")) {
@@ -2015,7 +2059,7 @@ static void parse_if(V5 *v)
             buf_add(&h2, c2.s ? c2.s : "false", c2.len);
             free(c2.s);
             open_block(v, &h2, l2);
-            body(v);
+            all_return = body(v) && all_return;
             continue;
         }
         {
@@ -2023,12 +2067,14 @@ static void parse_if(V5 *v)
             memset(&h3, 0, sizeof h3);
             buf_puts(&h3, "else");
             open_block(v, &h3, cur(v)->line);
-            body(v);
+            all_return = body(v) && all_return;
+            has_else = true;
             break;
         }
     }
     close_block(v);
     free(head.s);
+    return has_else && all_return;
 }
 
 static void parse_while(V5 *v)
@@ -2186,7 +2232,7 @@ static void parse_for(V5 *v)
     }
 }
 
-static void parse_match(V5 *v)
+static bool parse_match(V5 *v)
 {
     int   line = cur(v)->line;
     int   id = v->tmp++;
@@ -2196,7 +2242,7 @@ static void parse_match(V5 *v)
     memset(&val, 0, sizeof val);
     adv(v); /* match */
     vt = expr(v, &val);
-    if (v->failed) { free(val.s); return; }
+    if (v->failed) { free(val.s); return false; }
 
     {
         Buf decl;
@@ -2215,6 +2261,8 @@ static void parse_match(V5 *v)
     {
         bool first = true;
         bool has_else = false;
+        bool has_case = false;
+        bool all_return = true;
         while (!v->failed && !at_p(v, "}") && cur(v)->kind != TK_EOF) {
             if (at_id(v, "else")) {
                 int l2 = cur(v)->line;
@@ -2223,7 +2271,7 @@ static void parse_match(V5 *v)
                 memset(&head, 0, sizeof head);
                 buf_puts(&head, "else");
                 open_block(v, &head, l2);
-                body(v);
+                all_return = body(v) && all_return;
                 close_block(v);
                 has_else = true;
                 break;
@@ -2250,8 +2298,9 @@ static void parse_match(V5 *v)
                                pat.s ? pat.s : "0");
                 free(pat.s);
                 first = false;
+                has_case = true;
                 open_block(v, &head, l2);
-                body(v);
+                all_return = body(v) && all_return;
                 close_block(v);
             }
         }
@@ -2259,23 +2308,32 @@ static void parse_match(V5 *v)
             verr(v, line, "match on %s needs an else branch",
                  kind_name(vt->kind));
         if (!v->failed && at_p(v, "}")) adv(v);
+        return has_case && has_else && all_return;
     }
 }
 
-static void parse_ret(V5 *v)
+static bool parse_ret(V5 *v)
 {
     int line = cur(v)->line;
     Buf b;
+    bool bare;
+
     memset(&b, 0, sizeof b);
     adv(v);
-    if (at_p(v, "}") || cur(v)->kind == TK_EOF) {
+    bare = at_p(v, "}") || cur(v)->kind == TK_EOF;
+    if (bare) {
+        if (v->cur_ret && v->cur_ret->kind != TY_VOID)
+            verr(v, line, "non-void function must return a value");
         buf_puts(&b, "return");
     } else {
+        if (v->cur_ret && v->cur_ret->kind == TY_VOID)
+            verr(v, line, "void function must not return a value");
         buf_puts(&b, "return ");
         expr(v, &b);
     }
     emit_line(v, line, &b);
     free(b.s);
+    return true;
 }
 
 static void parse_del(V5 *v)
@@ -2745,6 +2803,7 @@ static void parse_struct(V5 *v)
     while (!v->failed && !at_p(v, "}") && cur(v)->kind != TK_EOF) {
         if (at_id(v, "fn")) {
             /* method signature */
+            Tok *mstart = cur(v);
             Tok *mn;
             Fn  *m;
             adv(v);
@@ -2812,7 +2871,17 @@ static void parse_struct(V5 *v)
                 }
                 for (i = 0; i < m->np; i++)
                     push_var(v, m->pname[i], m->ptype[i], true, false);
-                body(v);
+                v->cur_struct = s;
+                v->cur_ret    = m->ret;
+                {
+                    bool returns = body(v);
+                    v->cur_struct = NULL;
+                    v->cur_ret    = NULL;
+                    if (m->ret->kind != TY_VOID && !returns)
+                        verr_at(v, mstart->file, mstart->line,
+                                "missing return in non-void method '%s.%s'",
+                                s->name, mn->text);
+                }
                 close_block(v);
                 v->nloc = 0;
             }
@@ -2828,14 +2897,14 @@ static void parse_struct(V5 *v)
             if (v->failed) return;
             expect_p(v, ":");
             ft = parse_type(v);
-            (void)is_pub;
             if (v->scan) {
                 if (s->nf == s->cf) {
                     s->cf = s->cf ? s->cf * 2 : 4;
                     s->f = realloc(s->f, (size_t)s->cf * sizeof *s->f);
                 }
-                s->f[s->nf].name = fn_tok->text;
-                s->f[s->nf].ty   = ft;
+                s->f[s->nf].name   = fn_tok->text;
+                s->f[s->nf].ty     = ft;
+                s->f[s->nf].is_pub = is_pub;
                 s->nf++;
             }
         }
@@ -2928,6 +2997,7 @@ static void parse_pack(V5 *v)
 static void parse_fn(V5 *v)
 {
     int line = cur(v)->line;
+    Tok *fstart = cur(v);
     Tok *nt;
     Fn  *f;
     int  i;
@@ -2987,7 +3057,15 @@ static void parse_fn(V5 *v)
         v->nloc = 0;
         for (i = 0; i < f->np; i++)
             push_var(v, f->pname[i], f->ptype[i], true, false);
-        body(v);
+        {
+            bool returns;
+            v->cur_ret = f->ret;
+            returns = body(v);
+            v->cur_ret = NULL;
+            if (f->ret->kind != TY_VOID && !returns)
+                verr_at(v, fstart->file, fstart->line,
+                        "missing return in non-void function '%s'", f->name);
+        }
         close_block(v);
         v->nloc = 0;
     }

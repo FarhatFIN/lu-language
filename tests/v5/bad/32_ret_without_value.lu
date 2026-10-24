@@ -1,0 +1,9 @@
+Lu/Strict
+
+fn f() -> int {
+    ret
+}
+
+fn main() -> int {
+    ret f()
+}

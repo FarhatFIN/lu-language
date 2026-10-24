@@ -1,0 +1,30 @@
+Lu/Strict
+
+// Indexed stores and loads where both the pointer and the index live in
+// cached registers. The base ends up in r12 (needs the disp32 SIB form) and
+// in r14; the index in r13. A wrong SIB encoding stores the address instead
+// of the value, so the printed sum catches it.
+fn main() -> int {
+    var p: ptr/int64 = Alloc(64)
+    var i: int64 = 0
+    var q: ptr/int64 = Alloc(64)
+    var acc: int64 = 0
+
+    while i < 8 {
+        set p[i] = i * 10 + 3
+        set q[i] = i * 2 + 1
+        set i = i + 1
+    }
+
+    set i = 0
+    while i < 8 {
+        set acc = acc + p[i]
+        set acc = acc + q[i]
+        set i = i + 1
+    }
+
+    Pr(acc)
+    Del p
+    Del q
+    ret 0
+}
